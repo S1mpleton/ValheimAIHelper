@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Valheim · AI напарник</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.1</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
+  <section id="pairing">
+    <h2>01 · Подключение к мосту</h2>
+    <p>Откройте файл <code>.local/bridge-token</code> рядом с пусковым скриптом и вставьте код. Это локальный код сопряжения, а не ключ GPT или Gemini.</p>
+    <form id="pair-form"><label for="bridge-token">Код сопряжения</label><div class="row"><input id="bridge-token" type="password" autocomplete="off" required><button>Подключить</button></div></form>
+  </section>
+  <div id="dashboard" hidden>
+    <div class="grid">
+      <section>
+        <h2>02 · Ассистент</h2>
+        <form id="provider-form">
+          <label for="provider">Провайдер</label>
+          <select id="provider"><option value="openai">OpenAI / GPT</option><option value="gemini">Google Gemini</option><option value="offline">Без нейросети</option></select>
+          <label for="model">Модель</label><input id="model" value="gpt-4.1-mini" maxlength="100" required>
+          <label for="api-key">API-ключ <span id="key-status"></span></label><input id="api-key" type="password" autocomplete="off" placeholder="Хранится только в памяти сервиса">
+          <p class="hint">Ключ оплачивается по тарифам API. Подписка ChatGPT или Gemini не заменяет API-ключ. Состояние мира отправляется выбранному провайдеру при включении AI.</p>
+          <button>Применить настройки</button>
+        </form>
+      </section>
+      <section>
+        <h2>03 · Задача напарнику</h2>
+        <form id="objective-form"><label for="objective">Что нужно делать?</label><textarea id="objective" rows="4" maxlength="1000">Следуй за лидером, подбирай полезные предметы рядом и ешь, когда это нужно. Избегай опасных боёв.</textarea><button id="ai-start">Включить AI</button></form>
+        <div class="row controls"><button id="follow" class="secondary">Просто следовать</button><button id="stop" class="danger">Стоп</button></div>
+        <p class="hint">Следование работает без API-ключа. Лидер задаётся по имени в конфигурации мода; без имени выбирается ближайший игрок. F9 в игре немедленно возвращает ручное управление.</p>
+        <p id="mode" class="status-line">Режим: стоп</p>
+      </section>
+    </div>
+    <section class="world"><h2>Персонаж</h2><p id="actor">Ждём наблюдение из игры…</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают.</p></section>
+    <section><h2>Последние решения</h2><p class="hint">Ответы ассистента видны только здесь и в панели мода. Сообщения в игровой чат не отправляются.</p><ol id="events" aria-live="polite"></ol></section>
+  </div>
+  <footer>Сейчас доступны: следование, ожидание, подбор с земли, еда, экипировка и ближний бой с врагами. Строительство, добыча, крафт, сундуки, порталы и возрождение требуют человека.</footer>
+</main>
+</body>
+</html>

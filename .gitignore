@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.local/
+.env
+!.env.example
+**/bin/
+**/obj/
+dist/*
+!dist/ValheimAIHelper-windows-*.zip
+!dist/ValheimAIHelper-windows-*.zip.sha256
+.DS_Store
