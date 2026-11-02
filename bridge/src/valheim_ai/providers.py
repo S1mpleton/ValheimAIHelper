@@ -42,7 +42,15 @@ class ProviderUnavailable(ProviderError):
     """503 persisted after bounded retries; caller should cool down."""
 
 
-def status_error(code: int) -> ProviderError:
+class ProviderModelNotFound(ProviderError):
+    """The configured model cannot be used; further AI cycles need operator input."""
+
+    def __init__(self, message: str, gemini_not_found: bool = False):
+        super().__init__(message)
+        self.gemini_not_found = gemini_not_found
+
+
+def status_error(code: int, response: httpx.Response) -> ProviderError:
     messages = {
         401: "API отклонил ключ (401)",
         403: "Нет доступа к API или модели (403)",
@@ -50,6 +58,16 @@ def status_error(code: int) -> ProviderError:
         429: "Лимит запросов или баланс API (429)",
         503: "API перегружен (503); повтор после паузы",
     }
+    if code == 404:
+        # Distinguish the expected Gemini error envelope from HTML/gateway replies.
+        # Only retain a boolean from the body, never arbitrary upstream text.
+        try:
+            data = response.json()
+            is_gemini = (isinstance(data, dict) and isinstance(data.get("error"), dict)
+                         and data["error"].get("status") == "NOT_FOUND")
+        except (ValueError, UnicodeError):
+            is_gemini = False
+        return ProviderModelNotFound(messages[404], gemini_not_found=is_gemini)
     cls = ProviderUnavailable if code == 503 else ProviderError
     return cls(messages.get(code, f"Ошибка API ({code})"))
 
@@ -62,7 +80,7 @@ async def request_api(client: httpx.AsyncClient, method: str, url: str, **kwargs
             await asyncio.sleep(RETRY_DELAYS[attempt])
             continue
         if response.is_error:
-            raise status_error(response.status_code)
+            raise status_error(response.status_code, response)
         return response
 
 
@@ -156,6 +174,16 @@ async def decide(
         else:
             raise ProviderError("Провайдер не выбран")
         return validate_decision(Decision.model_validate_json(text), snapshot)
+    except ProviderModelNotFound as exc:
+        # Never display the upstream body: it can include request data or credentials.
+        message = (
+            "Gemini: 404 / NOT_FOUND. Модель недоступна для запроса generateContent. Проверьте API-имя и примените настройки."
+            if provider == "gemini" and exc.gemini_not_found else
+            "Gemini: HTTP 404 без стандартного ответа NOT_FOUND. Проверьте прокси/VPN и адрес API; отсутствие модели не подтверждено."
+            if provider == "gemini" else
+            "OpenAI: модель не найдена или недоступна (404). Проверьте API-имя модели и доступ проекта, затем примените настройки."
+        )
+        raise ProviderModelNotFound(message) from None
     except (httpx.RequestError, TimeoutError):
         raise ProviderError("API недоступен или не ответил вовремя") from None
     except (ValueError, KeyError, IndexError, TypeError, ValidationError):

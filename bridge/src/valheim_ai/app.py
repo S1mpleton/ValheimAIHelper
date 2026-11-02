@@ -15,7 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision
-from .providers import (ProviderError, ProviderUnavailable, decide, list_gemini_models,
+from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, decide, list_gemini_models,
                         API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .diagnostics import validation_diagnostics
 from . import __version__
@@ -29,6 +29,10 @@ class ProviderSettings(StrictModel):
 
 class ModelListRequest(StrictModel):
     api_key: SecretStr = SecretStr("")
+
+
+class GeminiCheckRequest(ModelListRequest):
+    model: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9._-]+$")
 
 
 class Command(StrictModel):
@@ -187,6 +191,27 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         except (ProviderError, TimeoutError) as exc:
             raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло") from None
 
+    @app.post("/api/check/gemini", dependencies=[Depends(authenticate)])
+    async def check_gemini(settings: GeminiCheckRequest):
+        key = settings.api_key.get_secret_value() or state.keys["gemini"]
+        if not key:
+            raise HTTPException(409, "Введите API-ключ Gemini или примените его в настройках")
+        # Explicit operator-triggered check uses the exact production adapter and schema,
+        # but no game observations or control state. The result is never sent to the mod.
+        probe = Snapshot(
+            session_id="api-check", sequence=1, supported_actions=["wait"],
+            actor={"id": "api-check", "name": "API check", "position": {"x": 0, "y": 0, "z": 0},
+                   "health": 1, "max_health": 1, "stamina": 0},
+        )
+        try:
+            await asyncio.wait_for(decide(
+                state.client, "gemini", settings.model, key,
+                "Проверка API. Верни действие wait, пустой target_id, duration=1 и короткое say.", probe,
+            ), DECISION_TIMEOUT)
+        except (ProviderError, TimeoutError) as exc:
+            raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло") from None
+        return {"ok": True, "model": settings.model}
+
     @app.post("/api/provider", dependencies=[Depends(authenticate)])
     async def configure(settings: ProviderSettings):
         if settings.provider != "offline" and not settings.model:
@@ -235,6 +260,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         revision = state.revision
         mode = state.command.mode
         source = "local"
+        model_not_found = False
         result = wait()
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
@@ -257,6 +283,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                     ), timeout=DECISION_TIMEOUT)
                     source = state.provider
                 except (ProviderError, TimeoutError) as exc:
+                    model_not_found = isinstance(exc, ProviderModelNotFound)
                     if isinstance(exc, ProviderUnavailable):
                         state.retry_after = time.monotonic() + 15
                     message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
@@ -268,6 +295,12 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if revision != state.revision or snapshot.sequence != state.last_sequence:
             result = wait("Команда изменилась; старый ответ отменён")
             source = "fallback"
+        elif model_not_found:
+            # A permanent configuration error must not trigger a paid/API call every cycle.
+            # Apply only to the still-current command; never stop a newer configuration.
+            state.command = Command(mode="stop", objective=state.command.objective)
+            state.revision += 1
+            result = wait("AI остановлен. " + result.say)
         result = validate_decision(result, snapshot)
         state.event(source, result.say or result.action.value)
         return DecisionReply(**result.model_dump(), sequence=snapshot.sequence,

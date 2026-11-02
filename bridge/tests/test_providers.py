@@ -60,6 +60,36 @@ async def test_timeout_is_safe(snapshot):
     assert "test-secret" not in str(error.value)
 
 
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
+async def test_404_has_safe_provider_guidance_without_retries(snapshot, provider):
+    from valheim_ai.providers import ProviderModelNotFound
+    calls = []
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(404, json={"error": {"code": 404, "status": "NOT_FOUND", "message": "sensitive-provider-body test-secret"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ProviderModelNotFound) as error:
+            await decide(client, provider, "missing-model", "test-secret", "wait", Snapshot(**snapshot))
+    message = str(error.value)
+    assert ("Gemini" if provider == "gemini" else "OpenAI") in message
+    assert "404" in message and "примените настройки" in message
+    assert "test-secret" not in message and "sensitive-provider-body" not in message
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("body", ['<html>gateway test-secret</html>', '{"unexpected":"test-secret"}'])
+async def test_nonstandard_404_does_not_claim_model_is_missing(snapshot, body):
+    from valheim_ai.providers import ProviderModelNotFound
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(404, text=body)
+    )) as client:
+        with pytest.raises(ProviderModelNotFound) as error:
+            await decide(client, "gemini", "test", "test-secret", "wait", Snapshot(**snapshot))
+    assert "без стандартного ответа" in str(error.value)
+    assert "прокси/VPN" in str(error.value)
+    assert "test-secret" not in str(error.value)
+
+
 @pytest.mark.parametrize("statuses,delays", [([503, 200], [2]), ([503, 503, 200], [2, 4]), ([503, 503, 503], [2, 4]), ([429], [])])
 async def test_retry_is_bounded_and_pauses(snapshot, monkeypatch, statuses, delays):
     from valheim_ai import providers

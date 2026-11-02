@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.1.2</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.1.3</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
   <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
@@ -23,9 +23,15 @@
         <form id="provider-form">
           <label for="provider">Провайдер</label>
           <select id="provider"><option value="openai">OpenAI / GPT</option><option value="gemini">Google Gemini</option><option value="offline">Без нейросети</option></select>
-          <label for="model">Модель</label><input id="model" list="gemini-models" value="gpt-4.1-mini" maxlength="100" required>
-          <datalist id="gemini-models"></datalist>
-          <button id="load-models" type="button" class="secondary" hidden>Получить модели Gemini</button>
+          <label for="model">API-имя модели</label><input id="model" value="gpt-4.1-mini" maxlength="100" placeholder="Выберите из списка или введите API-имя" required>
+          <div id="gemini-model-controls" hidden>
+            <button id="load-models" type="button" class="secondary">Получить модели Gemini</button>
+            <label for="gemini-model-choice">Модели из API Google</label>
+            <select id="gemini-model-choice" disabled><option value="">Сначала получите список моделей</option></select>
+            <p id="models-hint" class="hint">После выбора модели нажмите «Применить настройки».</p>
+            <button id="check-model" type="button" class="secondary">Проверить выбранную модель</button>
+            <p class="hint">Проверка выполняет короткий запрос к Gemini и может расходовать баланс API. Данные игры не отправляются.</p>
+          </div>
           <label for="api-key">API-ключ <span id="key-status"></span></label><input id="api-key" type="password" autocomplete="off" placeholder="Хранится только в памяти сервиса">
           <p class="hint">Ключ оплачивается по тарифам API. Подписка ChatGPT или Gemini не заменяет API-ключ. Состояние мира отправляется выбранному провайдеру при включении AI.</p>
           <button>Применить настройки</button>

@@ -9,7 +9,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.2")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.3")]
 [DefaultExecutionOrder(-100)]
 public sealed class Plugin : BaseUnityPlugin
 {
@@ -195,7 +195,7 @@ public sealed class Plugin : BaseUnityPlugin
         if (!showPanel) return;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.2");
+        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.3");
     }
 
     private void DrawPanel(int id)

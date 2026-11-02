@@ -274,3 +274,101 @@ async def test_total_deadline_returns_wait_and_releases_busy(snapshot, monkeypat
             assert result.json()["action"] == "wait"
             assert result.json()["source"] == "fallback"
             assert not app.state.bridge.busy
+
+
+async def test_404_stops_ai_and_recovers_after_model_change(snapshot):
+    calls = []
+    def handle(request):
+        calls.append(request)
+        if "missing-model" in request.url.path:
+            return httpx.Response(404, text="sensitive-body secret-key")
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps({
+            "action": "follow", "target_id": "leader", "duration": 2, "say": "Следую"
+        })}]}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH) as c:
+            await c.post("/api/decision", json=snapshot)
+            await c.post("/api/provider", json={"provider": "gemini", "model": "missing-model", "api_key": "secret-key"})
+            revision = (await c.post("/api/command", json={"mode": "ai"})).json()["revision"]
+            snapshot["sequence"] += 1
+            result = await c.post("/api/decision", json=snapshot)
+            assert result.json()["action"] == "wait"
+            assert result.json()["command_revision"] > revision
+            assert "AI остановлен" in result.json()["say"] and "404" in result.json()["say"]
+            assert "secret-key" not in result.text and "sensitive-body" not in result.text
+            assert (await c.get("/api/status")).json()["mode"] == "stop"
+            snapshot["sequence"] += 1
+            assert (await c.post("/api/decision", json=snapshot)).json()["action"] == "wait"
+            assert len(calls) == 1
+            await c.post("/api/provider", json={"provider": "gemini", "model": "available-model"})
+            await c.post("/api/command", json={"mode": "ai"})
+            snapshot["sequence"] += 1
+            assert (await c.post("/api/decision", json=snapshot)).json()["action"] == "follow"
+            assert len(calls) == 2
+
+
+async def test_old_404_does_not_stop_new_ai_configuration(snapshot):
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def handle(request):
+        entered.set()
+        await release.wait()
+        return httpx.Response(404)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH) as c:
+            await c.post("/api/decision", json=snapshot)
+            await c.post("/api/provider", json={"provider": "gemini", "model": "old", "api_key": "secret"})
+            await c.post("/api/command", json={"mode": "ai"})
+            snapshot["sequence"] += 1
+            task = asyncio.create_task(c.post("/api/decision", json=snapshot))
+            await asyncio.wait_for(entered.wait(), 2)
+            await c.post("/api/provider", json={"provider": "gemini", "model": "new"})
+            await c.post("/api/command", json={"mode": "ai"})
+            release.set()
+            result = await task
+            assert "старый ответ отменён" in result.json()["say"]
+            status = (await c.get("/api/status")).json()
+            assert status["mode"] == "ai" and status["model"] == "new"
+
+
+async def test_gemini_check_uses_typed_model_and_does_not_change_control():
+    # Create a separate upstream: the check has no live game observation or actor.
+    calls = []
+    def handle(request):
+        calls.append(request)
+        assert request.url.path.endswith("/models/probe-model:generateContent")
+        assert request.headers["x-goog-api-key"] == "temporary-key"
+        assert b'api-check' in request.content
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps({
+            "action": "wait", "target_id": "", "duration": 1, "say": "OK"
+        })}]}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as c:
+            assert (await c.post("/api/check/gemini", json={"model": "probe-model"})).status_code == 401
+            assert (await c.post("/api/check/gemini", headers=AUTH, json={"model": "probe-model"})).status_code == 409
+            result = await c.post("/api/check/gemini", headers=AUTH, json={"model": "probe-model", "api_key": "temporary-key"})
+            assert result.json() == {"ok": True, "model": "probe-model"}
+            assert len(calls) == 1
+            assert app.state.bridge.keys["gemini"] == ""
+            assert app.state.bridge.provider == "offline"
+            assert app.state.bridge.command.mode == "stop"
+            assert app.state.bridge.last_snapshot is None
+
+
+@pytest.mark.parametrize("standard", [True, False])
+async def test_gemini_check_404_reports_response_format_without_secrets(standard):
+    def handle(request):
+        if standard:
+            return httpx.Response(404, json={"error": {"status": "NOT_FOUND", "message": "private-key"}})
+        return httpx.Response(404, text="private-key proxy gateway")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        app.state.bridge.keys["gemini"] = "private-key"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH) as c:
+            result = await c.post("/api/check/gemini", json={"model": "selected-model"})
+            assert result.status_code == 502
+            assert ("404 / NOT_FOUND" if standard else "без стандартного ответа") in result.json()["detail"]
+            assert "private-key" not in result.text
+            assert app.state.bridge.command.mode == "stop"
