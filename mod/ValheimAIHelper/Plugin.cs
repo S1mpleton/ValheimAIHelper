@@ -9,7 +9,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.1")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.2")]
 [DefaultExecutionOrder(-100)]
 public sealed class Plugin : BaseUnityPlugin
 {
@@ -140,7 +140,8 @@ public sealed class Plugin : BaseUnityPlugin
                     request.downloadHandler = new DownloadHandlerBuffer();
                     request.SetRequestHeader("Content-Type", "application/json");
                     request.SetRequestHeader("Authorization", "Bearer " + bridgeToken.Value);
-                    request.timeout = 17;
+                    // Bridge budget: 100s including retries; leave transport headroom.
+                    request.timeout = 110;
                     pending = request;
                     yield return request.SendWebRequest();
                     pending = null;
@@ -194,7 +195,7 @@ public sealed class Plugin : BaseUnityPlugin
         if (!showPanel) return;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.1");
+        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.2");
     }
 
     private void DrawPanel(int id)

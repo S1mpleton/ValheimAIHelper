@@ -206,3 +206,71 @@ async def test_follow_without_leader_explains_why_it_waits(clients, snapshot):
     result = await c.post("/api/decision", headers=AUTH, json=snapshot)
     assert result.json()["action"] == "wait"
     assert "Лидер не виден" in result.json()["say"]
+
+
+
+async def test_models_auth_key_and_no_side_effects():
+    calls = []
+    def handle(request):
+        calls.append(request)
+        assert request.headers["x-goog-api-key"] == "temporary-secret"
+        return httpx.Response(200, json={"models": [{"name": "models/gemini-test", "supportedGenerationMethods": ["generateContent"]}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as c:
+            assert (await c.post("/api/models/gemini", json={})).status_code == 401
+            assert (await c.post("/api/models/gemini", headers=AUTH, json={})).status_code == 409
+            result = await c.post("/api/models/gemini", headers=AUTH, json={"api_key": "temporary-secret"})
+            assert result.json() == {"models": ["gemini-test"]}
+            assert len(calls) == 1
+            assert app.state.bridge.keys["gemini"] == ""
+            assert app.state.bridge.command.mode == "stop"
+            app.state.bridge.keys["gemini"] = "temporary-secret"
+            assert (await c.post("/api/models/gemini", headers=AUTH, json={})).status_code == 200
+
+
+async def test_503_cooldown_prevents_new_requests(snapshot, monkeypatch):
+    from valheim_ai import providers
+    calls = []
+    async def sleep(seconds):
+        pass
+    monkeypatch.setattr(providers.asyncio, "sleep", sleep)
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(503, text="secret response")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH) as c:
+            await c.post("/api/decision", json=snapshot)
+            await c.post("/api/provider", json={"provider": "gemini", "model": "test", "api_key": "secret"})
+            await c.post("/api/command", json={"mode": "ai"})
+            snapshot["sequence"] += 1
+            result = await c.post("/api/decision", json=snapshot)
+            assert result.json()["action"] == "wait" and "503" in result.json()["say"]
+            assert "secret" not in result.text
+            assert len(calls) == 3
+            snapshot["sequence"] += 1
+            assert (await c.post("/api/decision", json=snapshot)).json()["action"] == "wait"
+            assert len(calls) == 3
+            app.state.bridge.retry_after = 0
+            snapshot["sequence"] += 1
+            await c.post("/api/decision", json=snapshot)
+            assert len(calls) == 6
+
+
+async def test_total_deadline_returns_wait_and_releases_busy(snapshot, monkeypatch):
+    from valheim_ai import app as app_module
+    monkeypatch.setattr(app_module, "DECISION_TIMEOUT", 0.01)
+    async def handle(request):
+        await asyncio.Event().wait()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH) as c:
+            await c.post("/api/decision", json=snapshot)
+            await c.post("/api/provider", json={"provider": "gemini", "model": "test", "api_key": "secret"})
+            await c.post("/api/command", json={"mode": "ai"})
+            snapshot["sequence"] += 1
+            result = await c.post("/api/decision", json=snapshot)
+            assert result.json()["action"] == "wait"
+            assert result.json()["source"] == "fallback"
+            assert not app.state.bridge.busy

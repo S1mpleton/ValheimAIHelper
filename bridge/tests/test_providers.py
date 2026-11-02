@@ -58,3 +58,77 @@ async def test_timeout_is_safe(snapshot):
         with pytest.raises(ProviderError) as error:
             await decide(client, "openai", "test", "test-secret", "wait", Snapshot(**snapshot))
     assert "test-secret" not in str(error.value)
+
+
+@pytest.mark.parametrize("statuses,delays", [([503, 200], [2]), ([503, 503, 200], [2, 4]), ([503, 503, 503], [2, 4]), ([429], [])])
+async def test_retry_is_bounded_and_pauses(snapshot, monkeypatch, statuses, delays):
+    from valheim_ai import providers
+    pauses, calls = [], []
+    async def sleep(seconds):
+        pauses.append(seconds)
+    monkeypatch.setattr(providers.asyncio, "sleep", sleep)
+    def handle(request):
+        code = statuses[len(calls)]
+        calls.append(request)
+        return httpx.Response(code, json={"choices": [{"message": {"content": json.dumps(VALID)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        if statuses[-1] == 200:
+            assert (await decide(client, "openai", "test", "secret", "wait", Snapshot(**snapshot))).action == "follow"
+        else:
+            with pytest.raises(ProviderError):
+                await decide(client, "openai", "test", "secret", "wait", Snapshot(**snapshot))
+    assert pauses == delays
+    assert len(calls) == len(statuses)
+
+
+async def test_gemini_models_pagination_and_filtering():
+    from valheim_ai.providers import list_gemini_models
+    calls = []
+    def handle(request):
+        assert request.headers["x-goog-api-key"] == "secret"
+        assert "secret" not in str(request.url)
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"models": [
+                {"name": "models/gemini-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/embed", "supportedGenerationMethods": ["embedContent"]},
+                {"name": "models/invalid/name", "supportedGenerationMethods": ["generateContent"]},
+            ], "nextPageToken": "second"})
+        assert request.url.params["pageToken"] == "second"
+        return httpx.Response(200, json={"models": [
+            {"name": "models/gemini-pro", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-flash", "supportedGenerationMethods": ["generateContent"]},
+        ]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await list_gemini_models(client, "secret") == ["gemini-flash", "gemini-pro"]
+
+
+async def test_gemini_models_rejects_pagination_loop():
+    from valheim_ai.providers import list_gemini_models
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(
+        200, json={"nextPageToken": "same"}
+    ))) as client:
+        with pytest.raises(ProviderError):
+            await list_gemini_models(client, "secret")
+
+
+async def test_api_attempt_deadline(monkeypatch):
+    import asyncio
+    from valheim_ai import providers
+    monkeypatch.setattr(providers, "API_TIMEOUT", 0.01)
+    async def handle(request):
+        await asyncio.Event().wait()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ProviderError, match="вовремя"):
+            await providers.list_gemini_models(client, "secret")
+
+
+def test_timeout_budgets_match_mod():
+    from pathlib import Path
+    from valheim_ai.providers import API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT, RETRY_DELAYS
+    assert API_TIMEOUT * (len(RETRY_DELAYS) + 1) + sum(RETRY_DELAYS) < DECISION_TIMEOUT
+    plugin = (Path(__file__).parents[2] / "mod/ValheimAIHelper/Plugin.cs").read_text()
+    import re
+    mod_timeout = int(re.search(r"request.timeout = (\d+)", plugin)[1])
+    assert DECISION_TIMEOUT < mod_timeout
+    assert CONNECTED_TIMEOUT > mod_timeout + 60

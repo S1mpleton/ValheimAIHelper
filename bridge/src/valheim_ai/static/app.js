@@ -13,7 +13,7 @@ async function api(path, body) {
     method: body === undefined ? "GET" : "POST",
     headers: {"Authorization": `Bearer ${bridgeToken}`, ...(body === undefined ? {} : {"Content-Type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)}),
-    signal: AbortSignal.timeout(18000)
+    signal: AbortSignal.timeout(110000)
   });
   const data = await response.json();
   if (!response.ok) {
@@ -67,6 +67,7 @@ $("pair-form").addEventListener("submit", async e => {
     lastStatus = s;
     $("provider").value = s.provider === "offline" ? "openai" : s.provider;
     $("model").value = s.model || "gpt-4.1-mini";
+    $("load-models").hidden = $("provider").value !== "gemini";
     $("objective").value = s.objective;
     $("pairing").hidden = true; $("dashboard").hidden = false;
     notice("Мост подключён. Включите мод на отдельном персонаже через F8, затем выберите режим здесь.");
@@ -75,6 +76,8 @@ $("pair-form").addEventListener("submit", async e => {
 });
 $("provider").addEventListener("change", () => {
   const p = $("provider").value;
+  $("load-models").hidden = p !== "gemini";
+  $("gemini-models").replaceChildren();
   $("model").value = p === "gemini" ? "gemini-2.5-flash" : p === "openai" ? "gpt-4.1-mini" : "";
   $("model").required = p !== "offline";
   $("model").disabled = p === "offline";
@@ -103,3 +106,19 @@ $("objective-form").addEventListener("submit", e => {e.preventDefault(); command
 $("follow").addEventListener("click", () => command("follow"));
 $("stop").addEventListener("click", () => command("stop"));
 setInterval(refresh, 2000);
+
+
+$("load-models").addEventListener("click", async () => {
+  const button = $("load-models");
+  button.disabled = true;
+  const key = $("api-key").value.trim();
+  try {
+    const data = await api("/api/models/gemini", {api_key: key});
+    if ($("provider").value !== "gemini") return;
+    $("gemini-models").replaceChildren(...data.models.map(model => {
+      const option = document.createElement("option"); option.value = model; return option;
+    }));
+    notice(data.models.length ? `Получено моделей: ${data.models.length}. Выберите модель в поле выше и примените настройки.` : "API не вернул моделей с generateContent.");
+  } catch (error) { notice(error.message, true); }
+  finally { button.disabled = false; }
+});

@@ -15,7 +15,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision
-from .providers import ProviderError, decide
+from .providers import (ProviderError, ProviderUnavailable, decide, list_gemini_models,
+                        API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .diagnostics import validation_diagnostics
 from . import __version__
 
@@ -23,6 +24,10 @@ from . import __version__
 class ProviderSettings(StrictModel):
     provider: str = Field(pattern="^(openai|gemini|offline)$")
     model: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9._-]*$")
+    api_key: SecretStr = SecretStr("")
+
+
+class ModelListRequest(StrictModel):
     api_key: SecretStr = SecretStr("")
 
 
@@ -44,6 +49,7 @@ class State:
         self.command = Command(mode="stop")
         self.revision = 0
         self.busy = False
+        self.retry_after = 0.0
         self.session_id: str | None = None
         self.last_sequence = 0
         self.last_seen = 0.0
@@ -74,7 +80,7 @@ def load_token(data_dir: Path) -> str:
 def create_app(token: str | None = None, client: httpx.AsyncClient | None = None) -> FastAPI:
     owned_client = client is None
     client = client or httpx.AsyncClient(
-        timeout=httpx.Timeout(12, connect=5), follow_redirects=False,
+        timeout=httpx.Timeout(API_TIMEOUT, connect=5), follow_redirects=False,
         limits=httpx.Limits(max_connections=4),
     )
     token = token or load_token(Path(os.environ.get("VALHEIM_AI_DATA_DIR", ".local")))
@@ -163,12 +169,23 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "mode": state.command.mode,
             "objective": state.command.objective,
             # Allow the configured mod polling interval (up to 60s) plus API latency.
-            "connected": bool(state.last_seen and time.monotonic() - state.last_seen < 90),
+            "connected": bool(state.last_seen and time.monotonic() - state.last_seen < CONNECTED_TIMEOUT),
             "actor": state.last_snapshot.actor.model_dump() if state.last_snapshot else None,
             "leader_id": state.last_snapshot.leader_id if state.last_snapshot else "",
             "snapshot_error": state.snapshot_error,
             "events": list(state.events),
         }
+
+    @app.post("/api/models/gemini", dependencies=[Depends(authenticate)])
+    async def models(settings: ModelListRequest):
+        key = settings.api_key.get_secret_value() or state.keys["gemini"]
+        if not key:
+            raise HTTPException(409, "Введите API-ключ Gemini или примените его в настройках")
+        try:
+            values = await asyncio.wait_for(list_gemini_models(state.client, key), DECISION_TIMEOUT)
+            return {"models": values}
+        except (ProviderError, TimeoutError) as exc:
+            raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло") from None
 
     @app.post("/api/provider", dependencies=[Depends(authenticate)])
     async def configure(settings: ProviderSettings):
@@ -176,6 +193,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise HTTPException(422, "Укажите модель")
         if settings.provider != "offline" and settings.api_key.get_secret_value():
             state.keys[settings.provider] = settings.api_key.get_secret_value()
+        state.retry_after = 0.0
         state.provider = settings.provider
         state.model = settings.model
         state.revision += 1
@@ -186,7 +204,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
 
     @app.post("/api/command", dependencies=[Depends(authenticate)])
     async def command(value: Command):
-        if value.mode != "stop" and (state.last_snapshot is None or state.snapshot_error or time.monotonic() - state.last_seen >= 90):
+        if value.mode != "stop" and (state.last_snapshot is None or state.snapshot_error or time.monotonic() - state.last_seen >= CONNECTED_TIMEOUT):
             reason = state.snapshot_error["message"] if state.snapshot_error else "Сначала включите мод через F8 и дождитесь данных персонажа в панели"
             raise HTTPException(409, reason)
         if value.mode == "ai" and not state.keys.get(state.provider):
@@ -223,7 +241,10 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         elif mode == "follow":
             result = wait("Лидер не виден. Подойдите к нему или задайте Player.LeaderName в конфигурации мода")
         elif mode == "ai":
-            if state.busy:
+            if time.monotonic() < state.retry_after:
+                result = wait("API перегружен (503); пауза 15 секунд перед новым запросом")
+                source = "fallback"
+            elif state.busy:
                 result = wait("Предыдущий запрос ещё выполняется")
             elif not state.keys.get(state.provider):
                 result = wait("Не задан API-ключ")
@@ -233,9 +254,11 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                     result = await asyncio.wait_for(decide(
                         state.client, state.provider, state.model, state.keys[state.provider],
                         state.command.objective, snapshot,
-                    ), timeout=14)
+                    ), timeout=DECISION_TIMEOUT)
                     source = state.provider
                 except (ProviderError, TimeoutError) as exc:
+                    if isinstance(exc, ProviderUnavailable):
+                        state.retry_after = time.monotonic() + 15
                     message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
                     result = wait(message)
                     source = "fallback"
