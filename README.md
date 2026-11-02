@@ -6,9 +6,11 @@
 
 ## Скачать
 
-[Архив для Windows 0.1.0](https://github.com/S1mpleton/ValheimAIHelper/raw/refs/heads/main/dist/ValheimAIHelper-windows-0.1.0.zip) · [Контрольная сумма SHA256](dist/ValheimAIHelper-windows-0.1.0.zip.sha256)
+[Архив для Windows 0.1.1](https://github.com/S1mpleton/ValheimAIHelper/raw/refs/heads/main/dist/ValheimAIHelper-windows-0.1.1.zip) · [Контрольная сумма SHA256](dist/ValheimAIHelper-windows-0.1.1.zip.sha256)
 
 Архив хранится прямо в Git в папке `dist`: его можно скачать с GitHub без доступа к этому чату. Внутри уже есть собранный плагин и пусковой скрипт; собирать DLL самостоятельно не нужно. Ниже — пошаговая установка.
+
+**Обновление с 0.1.0:** закройте игру и старое окно сервиса, распакуйте весь архив 0.1.1 и запустите его `scripts/start-windows.ps1` с вашим `-GameDir`. Нужны обновления и DLL, и Python-сервиса. После запуска игры в панели F8 должна быть версия **0.1.1**. В браузере обновите страницу (Ctrl+F5), выполните сопряжение и дождитесь имени/показателей персонажа. Затем закройте F8 и нажмите «Просто следовать». До появления корректного снимка кнопки действий отключены; при HTTP 422 панель теперь показывает отклонённое поле. Подробности — [изменения 0.1.1](docs/changelog.md).
 
 ## Важное условие: отдельный клиент
 
@@ -23,6 +25,7 @@
 | Действие | Как выполняется |
 | --- | --- |
 | Следовать за лидером | Пеший маршрут Valheim; без нейросети и API-платежей |
+| Идти вперёд | Команда AI «Иди вперёд»: короткий пеший шаг по маршруту, до 3 секунд / 4 м за действие |
 | Ждать | Нулевой ввод; персонаж остаётся в мире и может получать урон |
 | Подбирать | Только существующие предметы на земле рядом, через игровой подбор |
 | Есть | Только еда из собственного инвентаря, через штатное использование предмета |
@@ -38,7 +41,7 @@
 
 1. Установите Steam-версию Valheim и [Python 3.12](https://www.python.org/downloads/windows/). В установщике Python включите Python Launcher / Add Python to PATH.
 2. Установите [BepInExPack_Valheim](https://thunderstore.io/c/valheim/p/denikson/BepInExPack_Valheim/). Для ручной установки содержимое папки `BepInExPack_Valheim` должно оказаться рядом с `valheim.exe`. Запустите игру один раз и закройте её. Рядом с игрой должен быть `BepInEx/core/BepInEx.dll`.
-3. Распакуйте подготовленный архив `ValheimAIHelper-windows-0.1.0.zip` в обычную доступную для записи папку. В нём есть `plugin/ValheimAIHelper.dll`, `bridge`, `scripts` и эта инструкция. Если вы скачали исходники из GitHub, сначала соберите мод по инструкции разработчика ниже.
+3. Распакуйте подготовленный архив `ValheimAIHelper-windows-0.1.1.zip` в обычную доступную для записи папку. В нём есть `plugin/ValheimAIHelper.dll`, `bridge`, `scripts` и эта инструкция. Если вы скачали исходники из GitHub, сначала соберите мод по инструкции разработчика ниже.
 4. Откройте PowerShell в распакованной папке и выполните:
 
    ```powershell
@@ -93,13 +96,14 @@ python3 -m venv .venv
 export PYTHONPATH="$PWD/bridge/src"
 .venv/bin/python -m pytest bridge/tests -q
 .venv/bin/python scripts/smoke_bridge.py
+.venv/bin/python scripts/check_wire.py
 python3 scripts/bootstrap_mod.py
 dotnet test mod/ValheimAIHelper.Tests/ValheimAIHelper.Tests.csproj -c Release -p:RestoreLockedMode=true
 dotnet build mod/ValheimAIHelper/ValheimAIHelper.csproj -c Release -p:RestoreLockedMode=true
 .venv/bin/python scripts/package.py
 ```
 
-Для сервиса без установленной игры: `PYTHONPATH=bridge/src .venv/bin/python -m valheim_ai`. Проверка готовности: `GET /health` → `{"status":"ok","protocol_version":1}`. Пока нет наблюдений мода, панель корректно показывает ожидание игры.
+Для сервиса без установленной игры: `PYTHONPATH=bridge/src .venv/bin/python -m valheim_ai`. Проверка готовности: `GET /health` → `{"status":"ok","protocol_version":1,"version":"0.1.1"}`. Пока нет наблюдений мода, панель корректно показывает ожидание игры.
 
 На Windows сборка: `powershell -File .\scripts\build-mod.ps1`. Чтобы проверить сборку против **вашей установленной версии игры**, добавьте `-GameDir "путь к Valheim"`. Ссылочные пакеты из NuGet позволяют собирать код в CI без установки Valheim; они не исполняют игру и не доказывают её совместимость. DLL игры, Unity и BepInEx в наш архив не включаются.
 

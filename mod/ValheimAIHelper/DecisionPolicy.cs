@@ -14,9 +14,11 @@ public static class DecisionPolicy
             return false;
         var entity = s.entities.FirstOrDefault(e => e.id == d.target_id);
         var item = s.actor.inventory.FirstOrDefault(i => i.id == d.target_id);
+        if (d.action != "wait" && !s.supported_actions.Contains(d.action)) return false;
         switch (d.action)
         {
             case "wait": return d.target_id == "";
+            case "move": return d.target_id == "";
             case "follow": return entity?.kind == "player" && entity.id == s.leader_id;
             case "attack": return allowCombat && entity?.kind == "enemy" && InRange(s.actor.position, entity);
             case "pickup": return entity?.kind == "item" && InRange(s.actor.position, entity);

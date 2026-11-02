@@ -28,6 +28,7 @@ jobs:
       - run: python scripts/bootstrap_mod.py
       - run: dotnet test mod/ValheimAIHelper.Tests/ValheimAIHelper.Tests.csproj -c Release -p:RestoreLockedMode=true
       - run: dotnet build mod/ValheimAIHelper/ValheimAIHelper.csproj -c Release -p:RestoreLockedMode=true
+      - run: python scripts/check_wire.py
       - run: python scripts/package.py
       - uses: actions/upload-artifact@v4
         with:

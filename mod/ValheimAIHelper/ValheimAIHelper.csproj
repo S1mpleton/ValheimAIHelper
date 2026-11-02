@@ -4,13 +4,14 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <AssemblyName>ValheimAIHelper</AssemblyName>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <BepInExDir Condition="'$(BepInExDir)' == ''">$(MSBuildProjectDirectory)/../../.local/bepinex/BepInEx/core</BepInExDir>
     <GameManagedDir Condition="'$(GameManagedDir)' == ''"></GameManagedDir>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="System.Runtime.Serialization" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="ValheimGameLibs" Version="0.221.4" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
     <PackageReference Include="UnityEngine.Modules" Version="2021.3.33" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />

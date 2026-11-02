@@ -2,7 +2,7 @@ using System;
 
 namespace ValheimAIHelper;
 
-// JsonUtility uses serializable fields. Names intentionally match the Python wire schema.
+// WireJson serializes these fields. Names intentionally match the Python wire schema.
 [Serializable] public sealed class Position { public float x, y, z; }
 [Serializable] public sealed class InventoryEntry
 {
@@ -14,6 +14,7 @@ namespace ValheimAIHelper;
 {
     public string id = "", name = "";
     public Position position = new();
+    public Position forward = new() { z = 1 };
     public float health, max_health, stamina;
     public InventoryEntry[] inventory = Array.Empty<InventoryEntry>();
 }
@@ -31,7 +32,9 @@ namespace ValheimAIHelper;
     public Actor actor = new();
     public Entity[] entities = Array.Empty<Entity>();
     public string leader_id = "", previous_result = "";
+    public string[] supported_actions = { "wait", "follow", "move", "attack", "pickup", "eat", "equip" };
 }
+[Serializable] public sealed class BridgeError { public string detail = ""; }
 [Serializable] public sealed class Decision
 {
     public int protocol_version, sequence, command_revision;

@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.1</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.1.1</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
   <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
@@ -37,7 +37,7 @@
         <p id="mode" class="status-line">Режим: стоп</p>
       </section>
     </div>
-    <section class="world"><h2>Персонаж</h2><p id="actor">Ждём наблюдение из игры…</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают.</p></section>
+    <section class="world"><h2>Персонаж</h2><p id="bridge-error" role="alert" hidden></p><p id="actor">Ждём наблюдение из игры…</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают. Закройте панель F8, чтобы разрешить движение.</p></section>
     <section><h2>Последние решения</h2><p class="hint">Ответы ассистента видны только здесь и в панели мода. Сообщения в игровой чат не отправляются.</p><ol id="events" aria-live="polite"></ol></section>
   </div>
   <footer>Сейчас доступны: следование, ожидание, подбор с земли, еда, экипировка и ближний бой с врагами. Строительство, добыча, крафт, сундуки, порталы и возрождение требуют человека.</footer>

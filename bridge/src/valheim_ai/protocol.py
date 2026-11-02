@@ -27,10 +27,29 @@ class Actor(StrictModel):
     id: str = Field(min_length=1, max_length=100)
     name: str = Field(max_length=120)
     position: Vec3
+    forward: Vec3 = Field(default_factory=lambda: Vec3(x=0, y=0, z=1))
     health: float = Field(ge=0)
     max_health: float = Field(gt=0)
     stamina: float = Field(ge=0)
     inventory: list[InventoryItem] = Field(default_factory=list, max_length=64)
+
+    @field_validator("health", "stamina", mode="before")
+    @classmethod
+    def game_vitals(cls, value):
+        # Native spending/damage may overshoot zero. Normalise the observation,
+        # never the actual game statistic. NaN/Infinity still fail validation.
+        if type(value) in (int, float) and math.isfinite(value) and value < 0:
+            return 0
+        return value
+
+    @field_validator("inventory", mode="before")
+    @classmethod
+    def empty_stacks(cls, value):
+        if isinstance(value, list):
+            return [i for i in value if not (
+                isinstance(i, dict) and type(i.get("count")) in (int, float) and i["count"] == 0
+            )]
+        return value
 
 
 class Entity(StrictModel):
@@ -49,6 +68,11 @@ class Snapshot(StrictModel):
     entities: list[Entity] = Field(default_factory=list, max_length=64)
     leader_id: str = Field(default="", max_length=100)
     previous_result: str = Field(default="", max_length=240)
+    # An old mod never receives an action its executor does not understand.
+    supported_actions: list[str] = Field(
+        default_factory=lambda: ["wait", "follow", "attack", "pickup", "eat", "equip"],
+        max_length=16,
+    )
 
     @model_validator(mode="after")
     def unique_ids(self):
@@ -65,6 +89,7 @@ class Snapshot(StrictModel):
 class Action(str, Enum):
     WAIT = "wait"
     FOLLOW = "follow"
+    MOVE = "move"
     ATTACK = "attack"
     PICKUP = "pickup"
     EAT = "eat"
@@ -98,6 +123,15 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     """Never accept invented targets or arbitrary code from a provider."""
     if decision.action == Action.WAIT:
         return decision.model_copy(update={"target_id": ""})
+    if decision.action.value not in snapshot.supported_actions:
+        raise ValueError("This mod does not support the requested action")
+    if decision.action == Action.MOVE:
+        if decision.target_id != "":
+            raise ValueError("Forward movement has no arbitrary target")
+        forward = snapshot.actor.forward
+        if math.hypot(forward.x, forward.z) < 0.01:
+            raise ValueError("Forward direction is unavailable")
+        return decision
     entities = {e.id: e for e in snapshot.entities}
     inventory = {i.id: i for i in snapshot.actor.inventory}
     target = entities.get(decision.target_id)

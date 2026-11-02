@@ -52,3 +52,31 @@ def test_missing_leader_rejected(snapshot):
     snapshot["leader_id"] = "unknown"
     with pytest.raises(ValidationError):
         Snapshot(**snapshot)
+
+
+def test_native_negative_vitals_and_empty_stack_are_observations(snapshot):
+    snapshot["actor"]["stamina"] = -.01
+    snapshot["actor"]["health"] = -2
+    snapshot["actor"]["inventory"][0]["count"] = 0
+    parsed = Snapshot(**snapshot)
+    assert parsed.actor.stamina == 0
+    assert parsed.actor.health == 0
+    assert [i.id for i in parsed.actor.inventory] == ["inventory:1"]
+
+
+@pytest.mark.parametrize("field", ["stamina", "health", "max_health"])
+@pytest.mark.parametrize("number", [float("nan"), float("inf")])
+def test_nonfinite_game_stats_remain_invalid(snapshot, field, number):
+    snapshot["actor"][field] = number
+    with pytest.raises(ValidationError):
+        Snapshot(**snapshot)
+
+
+def test_move_requires_explicit_mod_capability_and_no_target(snapshot):
+    moving = action("move")
+    with pytest.raises(ValueError):
+        validate_decision(moving, Snapshot(**snapshot))
+    snapshot["supported_actions"] = ["wait", "move"]
+    assert validate_decision(moving, Snapshot(**snapshot)).action == "move"
+    with pytest.raises(ValueError):
+        validate_decision(action("move", "leader"), Snapshot(**snapshot))

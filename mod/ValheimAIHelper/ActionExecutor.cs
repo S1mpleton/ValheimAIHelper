@@ -10,6 +10,7 @@ internal sealed class ActionExecutor
     private Observation? observation;
     private float expires, nextPath, nextAttack, lastProgress;
     private Vector3 lastPosition;
+    private Vector3 moveTarget;
     private readonly List<Vector3> path = new();
     public string Result { get; private set; } = "Ожидание";
 
@@ -21,6 +22,9 @@ internal sealed class ActionExecutor
         nextPath = 0;
         lastProgress = Time.time;
         lastPosition = player.transform.position;
+        var forward = player.transform.forward;
+        forward.y = 0;
+        moveTarget = lastPosition + forward.normalized * 4f;
         path.Clear();
         Result = value.say.Length > 0 ? value.say : value.action;
     }
@@ -58,6 +62,7 @@ internal sealed class ActionExecutor
         switch (decision.action)
         {
             case "wait": return;
+            case "move": MoveTo(player, moveTarget, .7f); return;
             case "follow":
                 if (leader == null || !leader || leader.IsDead() || Observation.Id(leader) != id) { Stop(player, "Лидер не виден"); return; }
                 MoveTo(player, leader.transform.position, 3f);

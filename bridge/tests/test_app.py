@@ -147,3 +147,62 @@ async def test_provider_failure_returns_wait_without_secret(snapshot):
             assert result.json()["source"] == "fallback"
             assert "401" in result.json()["say"]
             assert "sensitive secret" not in result.text
+
+
+async def test_422_diagnostics_visible_and_clear_on_recovery(clients, snapshot):
+    _, c = clients
+    snapshot["actor"]["max_health"] = 0
+    result = await c.post("/api/decision", headers=AUTH, json=snapshot)
+    assert result.status_code == 422
+    assert "actor.max_health" in result.json()["detail"]
+    status = (await c.get("/api/status", headers=AUTH)).json()
+    assert status["actor"] is None
+    assert "actor.max_health" in status["snapshot_error"]["message"]
+    assert status["events"][0]["source"] == "bridge"
+    assert (await c.post("/api/command", headers=AUTH, json={"mode": "follow"})).status_code == 409
+    assert (await c.post("/api/command", headers=AUTH, json={"mode": "stop"})).status_code == 200
+    snapshot["actor"]["max_health"] = 25
+    snapshot["actor"]["stamina"] = -.01
+    assert (await c.post("/api/decision", headers=AUTH, json=snapshot)).status_code == 200
+    status = (await c.get("/api/status", headers=AUTH)).json()
+    assert status["snapshot_error"] is None
+    assert status["actor"]["stamina"] == 0
+    assert (await c.post("/api/command", headers=AUTH, json={"mode": "follow"})).status_code == 200
+
+
+async def test_follow_and_ai_not_accepted_before_first_observation(clients):
+    _, c = clients
+    for mode in ["follow", "ai"]:
+        result = await c.post("/api/command", headers=AUTH, json={"mode": mode})
+        assert result.status_code == 409
+        assert "F8" in result.json()["detail"]
+
+
+async def test_validation_diagnostics_cannot_echo_unknown_keys_or_values(clients, snapshot):
+    _, c = clients
+    snapshot["unexpected-secret-as-key"] = "secret-as-value"
+    result = await c.post("/api/decision", headers=AUTH, json=snapshot)
+    assert result.status_code == 422
+    assert "unexpected-secret-as-key" not in result.text
+    assert "secret-as-value" not in result.text
+    status = (await c.get("/api/status", headers=AUTH)).text
+    assert "unexpected-secret-as-key" not in status
+    assert "secret-as-value" not in status
+
+
+async def test_unauthenticated_invalid_body_cannot_poison_dashboard(clients):
+    _, c = clients
+    await c.post("/api/decision", json={"bad": "request"})
+    status = (await c.get("/api/status", headers=AUTH)).json()
+    assert status["snapshot_error"] is None
+
+
+async def test_follow_without_leader_explains_why_it_waits(clients, snapshot):
+    _, c = clients
+    snapshot["leader_id"] = ""
+    await c.post("/api/decision", headers=AUTH, json=snapshot)
+    await c.post("/api/command", headers=AUTH, json={"mode": "follow"})
+    snapshot["sequence"] += 1
+    result = await c.post("/api/decision", headers=AUTH, json=snapshot)
+    assert result.json()["action"] == "wait"
+    assert "Лидер не виден" in result.json()["say"]

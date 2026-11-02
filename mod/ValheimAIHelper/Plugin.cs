@@ -9,7 +9,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.0")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.1")]
 [DefaultExecutionOrder(-100)]
 public sealed class Plugin : BaseUnityPlugin
 {
@@ -26,8 +26,10 @@ public sealed class Plugin : BaseUnityPlugin
     private Coroutine? loop;
     private UnityWebRequest? pending;
     private string session = "", status = "F8 — панель. F9 — ручное управление.";
+    private string lastFailure = "";
     private int sequence;
     private Rect window = new(20, 80, 480, 340);
+    private GUIStyle? statusStyle;
 
     private void Awake()
     {
@@ -119,16 +121,22 @@ public sealed class Plugin : BaseUnityPlugin
         while (active && actor != null && actor)
         {
             // No controls are held while the API is thinking or the connection is down.
+            string previousResult = executor.Result;
             executor.Stop(actor, "Ожидаю решение");
             Observation? observation = null;
-            try { observation = Observation.Capture(actor, FindLeader(), session, ++sequence, status); }
-            catch (Exception ex) { status = "Ошибка наблюдения: " + ex.GetType().Name; }
+            string payload = "";
+            try
+            {
+                observation = Observation.Capture(actor, FindLeader(), session, ++sequence, previousResult);
+                payload = WireJson.Serialize(observation.Data);
+            }
+            catch (Exception ex) { observation = null; status = "Ошибка наблюдения: " + ex.GetType().Name; }
             float started = Time.realtimeSinceStartup;
             if (observation != null)
             {
                 using (var request = new UnityWebRequest(bridgeUrl.Value.TrimEnd('/') + "/api/decision", "POST"))
                 {
-                    request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(JsonUtility.ToJson(observation.Data)));
+                    request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
                     request.downloadHandler = new DownloadHandlerBuffer();
                     request.SetRequestHeader("Content-Type", "application/json");
                     request.SetRequestHeader("Authorization", "Bearer " + bridgeToken.Value);
@@ -139,7 +147,8 @@ public sealed class Plugin : BaseUnityPlugin
                     if (!active || actor == null || !actor) yield break;
                     if (request.result != UnityWebRequest.Result.Success)
                     {
-                        status = "Мост недоступен (HTTP " + request.responseCode + "). Управление остановлено.";
+                        status = BridgeFailure.Describe(request.responseCode, request.downloadHandler.text);
+                        if (status != lastFailure) { Logger.LogWarning(status); lastFailure = status; }
                         executor.Stop(actor, status);
                     }
                     else if (request.downloadHandler.data.Length > 8192)
@@ -147,12 +156,13 @@ public sealed class Plugin : BaseUnityPlugin
                     else
                     {
                         Decision? decision = null;
-                        try { decision = JsonUtility.FromJson<Decision>(request.downloadHandler.text); }
+                        try { decision = WireJson.Deserialize<Decision>(request.downloadHandler.text); }
                         catch (Exception) { status = "Некорректный ответ моста"; }
                         if (DecisionPolicy.Accept(decision, observation.Data, allowCombat.Value))
                         {
                             executor.Set(decision!, observation, actor);
                             status = decision!.say.Length > 0 ? decision.say : decision.action;
+                            lastFailure = "";
                         }
                         else { status = "Действие отклонено локальной проверкой"; executor.Stop(actor, status); }
                     }
@@ -161,7 +171,7 @@ public sealed class Plugin : BaseUnityPlugin
             // Let the bounded action execute, then request a fresh observation.
             float remaining = Mathf.Max(interval.Value - (Time.realtimeSinceStartup - started), 3f);
             yield return new WaitForSecondsRealtime(remaining);
-            if (active) status = executor.Result;
+            // Keep transport/schema failures visible even while the F8 panel pauses actions.
         }
     }
 
@@ -184,7 +194,7 @@ public sealed class Plugin : BaseUnityPlugin
         if (!showPanel) return;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1");
+        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.1");
     }
 
     private void DrawPanel(int id)
@@ -192,7 +202,8 @@ public sealed class Plugin : BaseUnityPlugin
         GUILayout.Label("Этот мод управляет ТЕКУЩИМ персонажем.\nВключайте его только в отдельном клиенте напарника.");
         GUILayout.Space(10);
         GUILayout.Label(active ? "Управление AI: включено" : "Управление AI: выключено");
-        GUILayout.Label(status);
+        statusStyle = statusStyle ?? new GUIStyle(GUI.skin.label) { wordWrap = true };
+        GUILayout.Label(status, statusStyle, GUILayout.MaxWidth(440));
         GUILayout.Label("Действие: " + executor.Result);
         GUILayout.Space(10);
         if (!active && GUILayout.Button("Включить для этого персонажа"))

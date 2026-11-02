@@ -16,6 +16,8 @@ import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision
 from .providers import ProviderError, decide
+from .diagnostics import validation_diagnostics
+from . import __version__
 
 
 class ProviderSettings(StrictModel):
@@ -46,6 +48,7 @@ class State:
         self.last_sequence = 0
         self.last_seen = 0.0
         self.last_snapshot: Snapshot | None = None
+        self.snapshot_error: dict | None = None
         self.events: deque[dict] = deque(maxlen=50)
 
     def event(self, source: str, message: str):
@@ -90,9 +93,14 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         # FastAPI's default errors include raw rejected input; it may contain an API key.
-        return JSONResponse({"detail": "Некорректный формат запроса", "errors": [
-            {"loc": list(e["loc"]), "type": e["type"]} for e in exc.errors()
-        ]}, status_code=422)
+        detail, errors = validation_diagnostics(exc.errors())
+        valid_token = hmac.compare_digest(request.headers.get("authorization", "").encode(),
+                                          ("Bearer " + state.token).encode())
+        if request.url.path == "/api/decision" and valid_token:
+            state.snapshot_error = {"message": "Данные игры отклонены (HTTP 422). " + detail, "errors": errors}
+            if not state.events or state.events[0]["message"] != state.snapshot_error["message"]:
+                state.event("bridge", state.snapshot_error["message"])
+        return JSONResponse({"detail": detail, "errors": errors}, status_code=422)
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
@@ -144,7 +152,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "protocol_version": 1}
+        return {"status": "ok", "protocol_version": 1, "version": __version__}
 
     @app.get("/api/status", dependencies=[Depends(authenticate)])
     async def status():
@@ -158,6 +166,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "connected": bool(state.last_seen and time.monotonic() - state.last_seen < 90),
             "actor": state.last_snapshot.actor.model_dump() if state.last_snapshot else None,
             "leader_id": state.last_snapshot.leader_id if state.last_snapshot else "",
+            "snapshot_error": state.snapshot_error,
             "events": list(state.events),
         }
 
@@ -177,6 +186,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
 
     @app.post("/api/command", dependencies=[Depends(authenticate)])
     async def command(value: Command):
+        if value.mode != "stop" and (state.last_snapshot is None or state.snapshot_error or time.monotonic() - state.last_seen >= 90):
+            reason = state.snapshot_error["message"] if state.snapshot_error else "Сначала включите мод через F8 и дождитесь данных персонажа в панели"
+            raise HTTPException(409, reason)
         if value.mode == "ai" and not state.keys.get(state.provider):
             raise HTTPException(409, "Сначала выберите провайдера и добавьте API-ключ")
         state.command = value
@@ -201,12 +213,15 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.last_sequence = snapshot.sequence
         state.last_seen = now
         state.last_snapshot = snapshot
+        state.snapshot_error = None
         revision = state.revision
         mode = state.command.mode
         source = "local"
         result = wait()
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
+        elif mode == "follow":
+            result = wait("Лидер не виден. Подойдите к нему или задайте Player.LeaderName в конфигурации мода")
         elif mode == "ai":
             if state.busy:
                 result = wait("Предыдущий запрос ещё выполняется")

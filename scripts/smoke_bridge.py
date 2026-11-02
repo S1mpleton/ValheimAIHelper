@@ -56,15 +56,25 @@ def main():
                 "entities": [{"id": "leader", "name": "Leader", "kind": "player", "distance": 5,
                     "position": {"x": 5, "y": 0, "z": 0}}], "leader_id": "leader",
             }
+            invalid = {**snapshot, "actor": {**snapshot["actor"], "max_health": 0}}
+            try:
+                request("/api/decision", invalid, token)
+                raise AssertionError("Invalid snapshot was accepted")
+            except urllib.error.HTTPError as error:
+                assert error.code == 422
+                assert "actor.max_health" in json.loads(error.read())["detail"]
+            assert json.loads(request("/api/status", token=token))["snapshot_error"] is not None
             assert json.loads(request("/api/decision", snapshot, token))["action"] == "wait"
+            assert json.loads(request("/api/status", token=token))["snapshot_error"] is None
             request("/api/command", {"mode": "follow"}, token)
             snapshot["sequence"] = 2
+            snapshot["actor"]["stamina"] = -.01
             following = json.loads(request("/api/decision", snapshot, token))
             assert following["action"] == "follow" and following["target_id"] == "leader"
             request("/api/command", {"mode": "stop"}, token)
             snapshot["sequence"] = 3
             assert json.loads(request("/api/decision", snapshot, token))["action"] == "wait"
-            print("PASS: real bridge startup, dashboard, pairing, observation, follow, stop; zero model calls")
+            print("PASS: real bridge startup, dashboard, pairing, 422 diagnostics/recovery, native negative stamina, follow, stop; zero model calls")
         finally:
             process.terminate()
             try:

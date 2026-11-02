@@ -6,6 +6,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import create_app, load_token
+from . import __version__
 
 
 def main():
@@ -34,6 +35,7 @@ def main():
         with path.open("w", encoding="utf-8") as file:
             config.write(file, space_around_delimiters=True)
         print("Mod paired. Restart Valheim if it is running.")
+    print("Valheim AI Helper", __version__)
     print(f"Pairing code file: {args.data_dir.resolve() / 'bridge-token'}")
     print("Open the local dashboard on this computer at port", args.port)
     print("API keys entered in the dashboard remain in memory until shutdown.")

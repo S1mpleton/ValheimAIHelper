@@ -36,8 +36,13 @@ async function refresh() {
   try {
     const s = await api("/api/status");
     lastStatus = s;
-    $("connection").textContent = s.connected ? "Персонаж подключён" : "Ждём игру";
-    $("connection").classList.toggle("online", s.connected);
+    $("connection").textContent = s.snapshot_error ? "Данные игры отклонены" : s.connected ? "Персонаж подключён" : "Ждём игру";
+    $("connection").classList.toggle("online", s.connected && !s.snapshot_error);
+    $("bridge-error").hidden = !s.snapshot_error;
+    $("bridge-error").textContent = s.snapshot_error?.message || "";
+    const ready = s.connected && !s.snapshot_error;
+    $("ai-start").disabled = !ready;
+    $("follow").disabled = !ready;
     $("mode").textContent = `Режим: ${{stop: "стоп", follow: "следование без AI", ai: "AI"}[s.mode]}${s.mode === "ai" ? ` · ${s.model}` : ""}`;
     $("actor").textContent = s.actor
       ? `${s.actor.name} · здоровье ${Math.round(s.actor.health)}/${Math.round(s.actor.max_health)} · выносливость ${Math.round(s.actor.stamina)} · предметов в инвентаре: ${s.actor.inventory.length}`

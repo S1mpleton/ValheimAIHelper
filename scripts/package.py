@@ -3,6 +3,7 @@ import argparse
 import hashlib
 from pathlib import Path
 import zipfile
+import xml.etree.ElementTree as ET
 
 
 def main():
@@ -12,11 +13,14 @@ def main():
     args = parser.parse_args()
     if not args.dll.is_file():
         parser.error("Build the plugin before packaging")
-    output = root / "dist/ValheimAIHelper-windows-0.1.0.zip"
+    version = ET.parse(root / "mod/ValheimAIHelper/ValheimAIHelper.csproj").findtext("PropertyGroup/Version")
+    if not version:
+        parser.error("Plugin version is missing")
+    output = root / f"dist/ValheimAIHelper-windows-{version}.zip"
     output.parent.mkdir(exist_ok=True)
     files = [root / "README.md", root / "LICENSE", root / "bridge/requirements.txt", root / "scripts/start-windows.ps1"]
     files += sorted((root / "docs").glob("*.md"))
-    files += sorted(p for p in (root / "bridge/src").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
+    files += sorted(p for p in (root / "bridge/src/valheim_ai").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(args.dll, "ValheimAIHelper/plugin/ValheimAIHelper.dll")
         for path in files:

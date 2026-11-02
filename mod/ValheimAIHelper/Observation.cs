@@ -12,11 +12,16 @@ internal sealed class Observation
     public readonly Dictionary<string, ItemDrop.ItemData> Items = new();
 
     internal static string Id(Character c) => "character:" + c.GetInstanceID();
-    private static Position Pos(Vector3 p) => new() { x = p.x, y = p.y, z = p.z };
+    private static Position Pos(Vector3 p)
+    {
+        if (!ObservationValues.Finite(p.x) || !ObservationValues.Finite(p.y) || !ObservationValues.Finite(p.z))
+            throw new System.InvalidOperationException("Position is not ready");
+        return new Position { x = p.x, y = p.y, z = p.z };
+    }
     private static string Name(string value)
     {
-        string name = Localization.instance != null ? Localization.instance.Localize(value) : value;
-        return name.Substring(0, Mathf.Min(120, name.Length));
+        string name = Localization.instance != null ? Localization.instance.Localize(value ?? "") : value;
+        return ObservationValues.Text(name, 120);
     }
 
     public static bool IsEnemy(Player actor, Character target, Player? leader)
@@ -33,7 +38,7 @@ internal sealed class Observation
     {
         var o = new Observation();
         var origin = actor.transform.position;
-        var inventory = actor.GetInventory().GetAllItems().Take(64).ToList();
+        var inventory = actor.GetInventory().GetAllItems().Where(i => i != null && i.m_stack > 0).Take(64).ToList();
         var entries = new List<InventoryEntry>();
         for (int i = 0; i < inventory.Count; i++)
         {
@@ -41,7 +46,7 @@ internal sealed class Observation
             var id = "inventory:" + i;
             o.Items[id] = item;
             entries.Add(new InventoryEntry { id = id, name = Name(item.m_shared.m_name),
-                count = item.m_stack, equipped = item.m_equipped,
+                count = System.Math.Min(item.m_stack, 100000), equipped = item.m_equipped,
                 food = item.m_shared.m_food > 0, equipable = item.IsEquipable() });
         }
         var entities = new List<Entity>();
@@ -73,10 +78,14 @@ internal sealed class Observation
         }
         o.Data.session_id = session;
         o.Data.sequence = sequence;
-        o.Data.previous_result = result;
+        o.Data.previous_result = ObservationValues.Text(result, 240);
         o.Data.entities = entities.ToArray();
+        float maxHealth = actor.GetMaxHealth();
+        if (!ObservationValues.Finite(maxHealth) || maxHealth <= 0)
+            throw new System.InvalidOperationException("Player health is not ready");
         o.Data.actor = new Actor { id = "player:" + actor.GetPlayerID(), name = Name(actor.GetPlayerName()), position = Pos(origin),
-            health = actor.GetHealth(), max_health = actor.GetMaxHealth(), stamina = actor.GetStamina(),
+            forward = Pos(actor.transform.forward),
+            health = ObservationValues.Vital(actor.GetHealth()), max_health = maxHealth, stamina = ObservationValues.Vital(actor.GetStamina()),
             inventory = entries.ToArray() };
         return o;
     }
