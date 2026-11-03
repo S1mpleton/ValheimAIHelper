@@ -157,7 +157,7 @@ def test_timeout_budgets_match_mod():
     from pathlib import Path
     from valheim_ai.providers import API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT, RETRY_DELAYS
     assert API_TIMEOUT * (len(RETRY_DELAYS) + 1) + sum(RETRY_DELAYS) < DECISION_TIMEOUT
-    plugin = (Path(__file__).parents[2] / "mod/ValheimAIHelper/Plugin.cs").read_text()
+    plugin = (Path(__file__).parents[2] / "mod/ValheimAIHelper/Plugin.cs").read_text(encoding="utf-8")
     import re
     mod_timeout = int(re.search(r"request.timeout = (\d+)", plugin)[1])
     assert DECISION_TIMEOUT < mod_timeout
