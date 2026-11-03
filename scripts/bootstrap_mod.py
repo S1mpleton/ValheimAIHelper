@@ -30,7 +30,7 @@ def main():
     destination = cache / "bepinex"
     # Extract only compiler references, not the loader, injector or other executables.
     with zipfile.ZipFile(archive) as package:
-        for name in ["BepInEx/core/BepInEx.dll", "BepInEx/core/BepInEx.xml"]:
+        for name in ["BepInEx/core/BepInEx.dll", "BepInEx/core/BepInEx.xml", "BepInEx/core/0Harmony.dll"]:
             target = destination / name
             target.parent.mkdir(parents=True, exist_ok=True)
             content = package.read(name)

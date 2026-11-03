@@ -162,3 +162,42 @@ def test_timeout_budgets_match_mod():
     mod_timeout = int(re.search(r"request.timeout = (\d+)", plugin)[1])
     assert DECISION_TIMEOUT < mod_timeout
     assert CONNECTED_TIMEOUT > mod_timeout + 60
+
+
+@pytest.mark.parametrize("failed_step", [0, 1, 2])
+async def test_gemini_diagnostic_identifies_failed_stage_and_redacts_key(snapshot, failed_step):
+    from valheim_ai.providers import diagnose_gemini
+    calls = []
+    key = "private-google-key"
+    def handle(request):
+        step = len(calls)
+        calls.append(request)
+        if step == failed_step:
+            return httpx.Response(404, json={"error": {"status": "NOT_FOUND", "message":
+                "models/test is not found for API version v1beta or is not supported for generateContent. key=" + key}})
+        if request.method == "GET":
+            return httpx.Response(200, json={"supportedGenerationMethods": ["generateContent"]})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps(VALID)}]}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ProviderError) as error:
+            await diagnose_gemini(client, "test", key, Snapshot(**snapshot))
+    message = str(error.value)
+    assert len(calls) == failed_step + 1
+    assert "v1beta" in message and "Ответ Google:" in message
+    assert "not supported for generateContent" in message
+    assert key not in message
+    assert ["Карточка модели (GET", "Простая генерация (POST", "Генерация действия с JSON-схемой"][failed_step] in message
+    if failed_step > 0:
+        assert "Карточка модели: OK" in message
+    if failed_step > 1:
+        assert "Простая генерация: OK" in message
+
+
+def test_diagnostic_redacts_before_truncation_and_does_not_show_headers_or_bodies():
+    from valheim_ai.providers import safe_google_detail
+    key = "private-key-crossing-output-boundary"
+    response = httpx.Response(404, json={"error": {"message": "x" * 595 + key + "tail"}})
+    detail = safe_google_detail(response, key)
+    assert key not in detail and "private" not in detail
+    assert len(detail) <= 600
+    assert safe_google_detail(httpx.Response(404, text="<html>private-key</html>"), "private-key") == ""

@@ -15,5 +15,6 @@
     <Compile Include="../ValheimAIHelper/WireJson.cs" Link="WireJson.cs" />
     <Compile Include="../ValheimAIHelper/ObservationValues.cs" Link="ObservationValues.cs" />
     <Compile Include="../ValheimAIHelper/BridgeFailure.cs" Link="BridgeFailure.cs" />
+    <Compile Include="../ValheimAIHelper/ControlIntent.cs" Link="ControlIntent.cs" />
   </ItemGroup>
 </Project>

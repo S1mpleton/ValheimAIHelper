@@ -30,6 +30,38 @@ Output exactly the requested JSON object, without Markdown.
 class ProviderError(Exception):
     """A deliberately non-sensitive error safe to show in the local UI."""
 
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.diagnostic = ""
+
+
+def safe_google_detail(response: httpx.Response, api_key: str) -> str:
+    """An explicit check may show a bounded error.message, with credentials removed."""
+    try:
+        data = response.json()
+        error = data.get("error") if isinstance(data, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+    except (ValueError, UnicodeError):
+        return ""
+    if not isinstance(message, str):
+        return ""
+    # Redact before truncation so a key crossing the output boundary cannot leak.
+    if api_key:
+        message = message.replace(api_key, "[REDACTED]")
+    message = re.sub(r"AIza[A-Za-z0-9_-]{20,}", "[REDACTED]", message)
+    message = re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", message)
+    message = re.sub(r"https?://\S+", "[URL]", message)
+    message = re.sub(r"(?i)(api[_-]?key|access_token|token|key)\s*[=:]\s*[^\s,;]+", r"\1=[REDACTED]", message)
+    return " ".join("".join(c if c.isprintable() else " " for c in message).split())[:600]
+
+
+def gemini_error_message(error: ProviderError) -> str:
+    if isinstance(error, ProviderModelNotFound):
+        if error.gemini_not_found:
+            return "Gemini: 404 / NOT_FOUND. API не нашёл ресурс для этого запроса. Проверьте API-имя и примените настройки."
+        return "Gemini: HTTP 404 без стандартного ответа NOT_FOUND. Проверьте прокси/VPN и адрес API; отсутствие модели не подтверждено."
+    return str(error)
+
 
 # Three 30-second attempts plus 2s/4s backoff fit inside the bridge budget.
 API_TIMEOUT = 30
@@ -40,6 +72,10 @@ RETRY_DELAYS = (2, 4)
 
 class ProviderUnavailable(ProviderError):
     """503 persisted after bounded retries; caller should cool down."""
+
+
+class ProviderRateLimited(ProviderError):
+    """Automatic AI requests must stop until the operator checks the quota."""
 
 
 class ProviderModelNotFound(ProviderError):
@@ -68,7 +104,7 @@ def status_error(code: int, response: httpx.Response) -> ProviderError:
         except (ValueError, UnicodeError):
             is_gemini = False
         return ProviderModelNotFound(messages[404], gemini_not_found=is_gemini)
-    cls = ProviderUnavailable if code == 503 else ProviderError
+    cls = ProviderUnavailable if code == 503 else ProviderRateLimited if code == 429 else ProviderError
     return cls(messages.get(code, f"Ошибка API ({code})"))
 
 
@@ -80,7 +116,11 @@ async def request_api(client: httpx.AsyncClient, method: str, url: str, **kwargs
             await asyncio.sleep(RETRY_DELAYS[attempt])
             continue
         if response.is_error:
-            raise status_error(response.status_code, response)
+            error = status_error(response.status_code, response)
+            key = kwargs.get("headers", {}).get("x-goog-api-key", "")
+            if key:
+                error.diagnostic = safe_google_detail(response, key)
+            raise error
         return response
 
 
@@ -177,14 +217,49 @@ async def decide(
     except ProviderModelNotFound as exc:
         # Never display the upstream body: it can include request data or credentials.
         message = (
-            "Gemini: 404 / NOT_FOUND. Модель недоступна для запроса generateContent. Проверьте API-имя и примените настройки."
-            if provider == "gemini" and exc.gemini_not_found else
-            "Gemini: HTTP 404 без стандартного ответа NOT_FOUND. Проверьте прокси/VPN и адрес API; отсутствие модели не подтверждено."
-            if provider == "gemini" else
+            gemini_error_message(exc) if provider == "gemini" else
             "OpenAI: модель не найдена или недоступна (404). Проверьте API-имя модели и доступ проекта, затем примените настройки."
         )
-        raise ProviderModelNotFound(message) from None
+        error = ProviderModelNotFound(message, gemini_not_found=exc.gemini_not_found)
+        error.diagnostic = exc.diagnostic
+        raise error from None
     except (httpx.RequestError, TimeoutError):
         raise ProviderError("API недоступен или не ответил вовремя") from None
     except (ValueError, KeyError, IndexError, TypeError, ValidationError):
         raise ProviderError("Модель вернула недопустимое действие; персонаж остановлен") from None
+
+
+async def diagnose_gemini(client: httpx.AsyncClient, model: str, api_key: str, probe: Snapshot) -> list[str]:
+    """Explicit operator test: metadata, minimal generation, then the actual action adapter."""
+    completed = []
+    stage = "Карточка модели (GET, v1beta)"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+    try:
+        response = await request_api(client, "GET", url, headers={"x-goog-api-key": api_key})
+        data = response.json()
+        if "generateContent" not in data.get("supportedGenerationMethods", []):
+            raise ProviderError("Карточка модели не подтверждает поддержку generateContent")
+        completed.append("Карточка модели: OK")
+        stage = "Простая генерация (POST generateContent, v1beta)"
+        generation = {"maxOutputTokens": 32}
+        if model.startswith("gemini-2.5-flash"):
+            generation["thinkingConfig"] = {"thinkingBudget": 0}
+        await request_api(client, "POST", url + ":generateContent", headers={"x-goog-api-key": api_key}, json={
+            "contents": [{"role": "user", "parts": [{"text": "Reply with OK."}]}],
+            "generationConfig": generation,
+        })
+        completed.append("Простая генерация: OK")
+        stage = "Генерация действия с JSON-схемой (POST generateContent, v1beta)"
+        await decide(client, "gemini", model, api_key,
+                     "Проверка API. Верни действие wait, пустой target_id, duration=1 и короткое say.", probe)
+        completed.append("Формат действий: OK")
+        return completed
+    except ProviderError as exc:
+        message = "; ".join(completed + [stage + ": " + gemini_error_message(exc)])
+        if exc.diagnostic:
+            message += " Ответ Google: " + exc.diagnostic
+        raise ProviderError(message) from None
+    except (httpx.RequestError, TimeoutError):
+        raise ProviderError("; ".join(completed + [stage + ": API недоступен или не ответил вовремя"])) from None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ProviderError("; ".join(completed + [stage + ": некорректный ответ API"])) from None

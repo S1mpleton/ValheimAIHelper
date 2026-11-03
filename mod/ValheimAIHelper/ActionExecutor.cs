@@ -13,6 +13,7 @@ internal sealed class ActionExecutor
     private Vector3 moveTarget;
     private readonly List<Vector3> path = new();
     public string Result { get; private set; } = "Ожидание";
+    public ControlIntent Input { get; private set; }
 
     public void Set(Decision value, Observation from, Player player)
     {
@@ -35,24 +36,20 @@ internal sealed class ActionExecutor
         observation = null;
         path.Clear();
         Result = reason;
-        if (player != null && player) Controls(player, Vector3.zero, false);
+        Input = default;
     }
 
-    private static void Controls(Player player, Vector3 worldDirection, bool attack)
+    private void Controls(Player player, Vector3 worldDirection, bool attack)
     {
-        // SetControls supplies the game's normal attack input. SetMoveDir takes a world vector,
-        // avoiding dependence on the bot client's camera orientation. Physics stays native.
-        player.SetControls(Vector3.zero, attack, false, false, false, false, false, false, false, false, false);
-        player.SetRun(false);
-        player.SetMoveDir(worldDirection);
-        if (worldDirection.sqrMagnitude > .001f) player.SetLookDir(worldDirection);
+        Input = ControlIntent.Create(worldDirection.x, worldDirection.y, worldDirection.z, attack);
     }
 
     public void Tick(Player player, Player? leader, bool allowCombat)
     {
         Controls(player, Vector3.zero, false);
         if (decision == null || observation == null || Time.realtimeSinceStartup >= expires) return;
-        if (player.IsDead() || player.IsTeleporting() || player.IsAttached() || player.IsSwimming() ||
+        if (!player.IsOwner() || player != Player.m_localPlayer ||
+            player.IsDead() || player.IsTeleporting() || player.IsAttached() || player.IsSwimming() ||
             player.IsEncumbered() || player.IsSleeping() || player.InPlaceMode())
         {
             Stop(player, "Действие недоступно в текущем состоянии");

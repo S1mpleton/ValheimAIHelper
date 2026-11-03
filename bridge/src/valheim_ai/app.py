@@ -15,7 +15,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision
-from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, decide, list_gemini_models,
+from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited,
+                        decide, list_gemini_models, diagnose_gemini,
                         API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .diagnostics import validation_diagnostics
 from . import __version__
@@ -25,6 +26,7 @@ class ProviderSettings(StrictModel):
     provider: str = Field(pattern="^(openai|gemini|offline)$")
     model: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9._-]*$")
     api_key: SecretStr = SecretStr("")
+    request_interval_seconds: int = Field(default=20, ge=4, le=300)
 
 
 class ModelListRequest(StrictModel):
@@ -54,6 +56,8 @@ class State:
         self.revision = 0
         self.busy = False
         self.retry_after = 0.0
+        self.next_ai_request = 0.0
+        self.request_interval_seconds = 20
         self.session_id: str | None = None
         self.last_sequence = 0
         self.last_seen = 0.0
@@ -169,6 +173,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         return {
             "provider": state.provider,
             "model": state.model,
+            "request_interval_seconds": state.request_interval_seconds,
             "keys_present": {k: bool(v) for k, v in state.keys.items()},
             "mode": state.command.mode,
             "objective": state.command.objective,
@@ -204,13 +209,10 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                    "health": 1, "max_health": 1, "stamina": 0},
         )
         try:
-            await asyncio.wait_for(decide(
-                state.client, "gemini", settings.model, key,
-                "Проверка API. Верни действие wait, пустой target_id, duration=1 и короткое say.", probe,
-            ), DECISION_TIMEOUT)
+            checks = await asyncio.wait_for(diagnose_gemini(state.client, settings.model, key, probe), DECISION_TIMEOUT)
         except (ProviderError, TimeoutError) as exc:
             raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло") from None
-        return {"ok": True, "model": settings.model}
+        return {"ok": True, "model": settings.model, "checks": checks}
 
     @app.post("/api/provider", dependencies=[Depends(authenticate)])
     async def configure(settings: ProviderSettings):
@@ -219,6 +221,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if settings.provider != "offline" and settings.api_key.get_secret_value():
             state.keys[settings.provider] = settings.api_key.get_secret_value()
         state.retry_after = 0.0
+        state.next_ai_request = 0.0
+        state.request_interval_seconds = settings.request_interval_seconds
         state.provider = settings.provider
         state.model = settings.model
         state.revision += 1
@@ -260,7 +264,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         revision = state.revision
         mode = state.command.mode
         source = "local"
-        model_not_found = False
+        stop_for_api_error = False
         result = wait()
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
@@ -270,12 +274,15 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             if time.monotonic() < state.retry_after:
                 result = wait("API перегружен (503); пауза 15 секунд перед новым запросом")
                 source = "fallback"
+            elif time.monotonic() < state.next_ai_request:
+                result = wait("Пауза между решениями API; следование без AI доступно без паузы")
             elif state.busy:
                 result = wait("Предыдущий запрос ещё выполняется")
             elif not state.keys.get(state.provider):
                 result = wait("Не задан API-ключ")
             else:
                 state.busy = True
+                state.next_ai_request = time.monotonic() + state.request_interval_seconds
                 try:
                     result = await asyncio.wait_for(decide(
                         state.client, state.provider, state.model, state.keys[state.provider],
@@ -283,7 +290,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                     ), timeout=DECISION_TIMEOUT)
                     source = state.provider
                 except (ProviderError, TimeoutError) as exc:
-                    model_not_found = isinstance(exc, ProviderModelNotFound)
+                    stop_for_api_error = isinstance(exc, (ProviderModelNotFound, ProviderRateLimited))
                     if isinstance(exc, ProviderUnavailable):
                         state.retry_after = time.monotonic() + 15
                     message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
@@ -295,8 +302,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if revision != state.revision or snapshot.sequence != state.last_sequence:
             result = wait("Команда изменилась; старый ответ отменён")
             source = "fallback"
-        elif model_not_found:
-            # A permanent configuration error must not trigger a paid/API call every cycle.
+        elif stop_for_api_error:
+            # Missing models and exhausted quotas require operator input, not another cycle.
             # Apply only to the still-current command; never stop a newer configuration.
             state.command = Command(mode="stop", objective=state.command.objective)
             state.revision += 1

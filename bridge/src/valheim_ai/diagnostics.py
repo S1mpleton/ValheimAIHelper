@@ -4,7 +4,7 @@ FIELDS = frozenset({
     "body", "protocol_version", "session_id", "sequence", "actor", "id", "name", "position",
     "forward", "x", "y", "z", "health", "max_health", "stamina", "inventory", "count",
     "equipped", "food", "equipable", "entities", "kind", "distance", "leader_id",
-    "previous_result", "supported_actions", "provider", "model", "api_key", "mode", "objective",
+    "previous_result", "supported_actions", "provider", "model", "api_key", "mode", "objective", "request_interval_seconds",
 })
 
 

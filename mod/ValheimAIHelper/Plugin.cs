@@ -4,12 +4,13 @@ using System.Linq;
 using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
+using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.3")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.4")]
 [DefaultExecutionOrder(-100)]
 public sealed class Plugin : BaseUnityPlugin
 {
@@ -17,9 +18,12 @@ public sealed class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> allowCombat = null!;
     private ConfigEntry<float> interval = null!;
     private readonly ActionExecutor executor = new();
+    private static Plugin? instance;
+    private Harmony? harmony;
+    private bool inputPatchReady;
     private Player? actor;
     private PlayerController? controller;
-    private bool oldControllerEnabled, active, showPanel;
+    private bool active, showPanel;
     private CursorLockMode oldCursorLock;
     private bool oldCursorVisible;
     private long? leaderId;
@@ -38,6 +42,15 @@ public sealed class Plugin : BaseUnityPlugin
         leaderName = Config.Bind("Player", "LeaderName", "", "Exact leader character name. Empty: lock on nearest other player when AI is enabled.");
         allowCombat = Config.Bind("Player", "AllowCombat", false, "Allow basic melee against hostile monsters targeting you/leader.");
         interval = Config.Bind("Bridge", "DecisionInterval", 4f, new ConfigDescription("Minimum seconds between decisions (API costs apply).", new AcceptableValueRange<float>(3f, 60f)));
+        instance = this;
+        harmony = new Harmony("dev.valheim.aihelper.input");
+        try
+        {
+            harmony.PatchAll(typeof(ControlInputPatch));
+            inputPatchReady = true;
+        }
+        catch (Exception ex) { Logger.LogError("Native input hook is incompatible with this game: " + ex); }
+        Logger.LogInfo("Valheim version: " + global::Version.GetVersionString() + "; build references: 0.221.4");
         Logger.LogInfo("AI Helper loaded. Control is OFF. F8 panel; F9 emergency release.");
     }
 
@@ -45,13 +58,16 @@ public sealed class Plugin : BaseUnityPlugin
     {
         if (Input.GetKeyDown(KeyCode.F9)) { DisableControl("Ручное управление (F9)"); SetPanel(false); }
         if (Input.GetKeyDown(KeyCode.F8)) SetPanel(!showPanel);
-        if (active && (actor == null || !actor || actor != Player.m_localPlayer || actor.IsDead()))
-            DisableControl("Персонаж погиб или мир закрыт. AI отключён.");
+        if (active && (actor == null || !actor || actor != Player.m_localPlayer || !actor.IsOwner() || actor.IsDead() ||
+            controller == null || !controller || !controller.enabled))
+            DisableControl("Нет локального управления персонажем или мир закрыт. AI отключён.");
     }
 
     private void FixedUpdate()
     {
         if (!active || actor == null || !actor) return;
+        if (actor != Player.m_localPlayer || !actor.IsOwner())
+        { DisableControl("Сетевая принадлежность персонажа изменилась. AI отключён."); return; }
         if (showPanel || InventoryGui.IsVisible() || Menu.IsVisible() || global::Console.IsVisible() ||
             (Chat.instance != null && Chat.instance.HasFocus()))
         { executor.Stop(actor, "Пауза: открыта панель или игровое меню"); return; }
@@ -65,6 +81,8 @@ public sealed class Plugin : BaseUnityPlugin
 
     private bool EnableControl()
     {
+        if (!inputPatchReady)
+        { status = "Ввод несовместим с этой версией игры. Подробности в BepInEx/LogOutput.log."; return false; }
         var player = Player.m_localPlayer;
         if (!player || player.IsDead() || !player.IsOwner()) { status = "Сначала войдите персонажем в мир."; return false; }
         if (!Uri.TryCreate(bridgeUrl.Value, UriKind.Absolute, out var url) ||
@@ -76,12 +94,11 @@ public sealed class Plugin : BaseUnityPlugin
         if (!input || !input.enabled) { status = "Управление игроком уже перехвачено другим модом."; return false; }
         actor = player;
         controller = input;
-        oldControllerEnabled = input.enabled;
-        input.enabled = false;
         leaderId = null;
         session = Guid.NewGuid().ToString("N");
         sequence = 0;
         active = true;
+        Logger.LogInfo("Native input control enabled for local owner; PlayerController remains enabled.");
         status = "Подключаю мост. Затем выберите режим в локальной панели.";
         loop = StartCoroutine(DecisionLoop());
         return true;
@@ -95,12 +112,21 @@ public sealed class Plugin : BaseUnityPlugin
         try { executor.Stop(actor, reason); }
         finally
         {
-            if (controller != null && controller) controller.enabled = oldControllerEnabled;
             controller = null;
             actor = null;
             leaderId = null;
             status = reason;
         }
+    }
+
+    internal static bool TryGetInput(Player player, out ControlIntent input)
+    {
+        input = default;
+        var plugin = instance;
+        if (plugin == null || !plugin.active || player != plugin.actor ||
+            player != Player.m_localPlayer || !player.IsOwner()) return false;
+        input = plugin.executor.Input;
+        return true;
     }
 
     private Player? FindLeader()
@@ -195,7 +221,7 @@ public sealed class Plugin : BaseUnityPlugin
         if (!showPanel) return;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.3");
+        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.4");
     }
 
     private void DrawPanel(int id)
@@ -221,5 +247,7 @@ public sealed class Plugin : BaseUnityPlugin
     {
         DisableControl("Мод выгружен");
         SetPanel(false);
+        harmony?.UnpatchSelf();
+        if (instance == this) instance = null;
     }
 }

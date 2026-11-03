@@ -253,6 +253,7 @@ async def test_503_cooldown_prevents_new_requests(snapshot, monkeypatch):
             assert (await c.post("/api/decision", json=snapshot)).json()["action"] == "wait"
             assert len(calls) == 3
             app.state.bridge.retry_after = 0
+            app.state.bridge.next_ai_request = 0
             snapshot["sequence"] += 1
             await c.post("/api/decision", json=snapshot)
             assert len(calls) == 6
@@ -337,9 +338,13 @@ async def test_gemini_check_uses_typed_model_and_does_not_change_control():
     calls = []
     def handle(request):
         calls.append(request)
-        assert request.url.path.endswith("/models/probe-model:generateContent")
         assert request.headers["x-goog-api-key"] == "temporary-key"
-        assert b'api-check' in request.content
+        if request.method == "GET":
+            assert request.url.path.endswith("/models/probe-model")
+            return httpx.Response(200, json={"supportedGenerationMethods": ["generateContent"]})
+        assert request.url.path.endswith("/models/probe-model:generateContent")
+        if "responseJsonSchema" in json.loads(request.content)["generationConfig"]:
+            assert b'api-check' in request.content
         return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps({
             "action": "wait", "target_id": "", "duration": 1, "say": "OK"
         })}]}}]})
@@ -349,8 +354,9 @@ async def test_gemini_check_uses_typed_model_and_does_not_change_control():
             assert (await c.post("/api/check/gemini", json={"model": "probe-model"})).status_code == 401
             assert (await c.post("/api/check/gemini", headers=AUTH, json={"model": "probe-model"})).status_code == 409
             result = await c.post("/api/check/gemini", headers=AUTH, json={"model": "probe-model", "api_key": "temporary-key"})
-            assert result.json() == {"ok": True, "model": "probe-model"}
-            assert len(calls) == 1
+            assert result.json()["ok"] is True and result.json()["model"] == "probe-model"
+            assert result.json()["checks"] == ["Карточка модели: OK", "Простая генерация: OK", "Формат действий: OK"]
+            assert len(calls) == 3
             assert app.state.bridge.keys["gemini"] == ""
             assert app.state.bridge.provider == "offline"
             assert app.state.bridge.command.mode == "stop"
@@ -372,3 +378,41 @@ async def test_gemini_check_404_reports_response_format_without_secrets(standard
             assert ("404 / NOT_FOUND" if standard else "без стандартного ответа") in result.json()["detail"]
             assert "private-key" not in result.text
             assert app.state.bridge.command.mode == "stop"
+
+
+async def test_quota_429_stops_automatic_ai_requests(snapshot):
+    calls = []
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED", "message": "quota exhausted"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH) as c:
+            await c.post("/api/decision", json=snapshot)
+            await c.post("/api/provider", json={"provider": "gemini", "model": "test", "api_key": "test-key"})
+            await c.post("/api/command", json={"mode": "ai"})
+            snapshot["sequence"] += 1
+            result = await c.post("/api/decision", json=snapshot)
+            assert "AI остановлен" in result.json()["say"] and "429" in result.json()["say"]
+            for _ in range(3):
+                snapshot["sequence"] += 1
+                assert (await c.post("/api/decision", json=snapshot)).json()["action"] == "wait"
+            assert len(calls) == 1
+            assert app.state.bridge.command.mode == "stop"
+
+
+async def test_ai_interval_limits_calls_and_does_not_delay_local_follow(clients, snapshot):
+    app, c = clients
+    await c.post("/api/decision", headers=AUTH, json=snapshot)
+    await c.post("/api/provider", headers=AUTH, json={"provider": "openai", "model": "test", "api_key": "key", "request_interval_seconds": 30})
+    await c.post("/api/command", headers=AUTH, json={"mode": "ai"})
+    snapshot["sequence"] += 1
+    assert (await c.post("/api/decision", headers=AUTH, json=snapshot)).json()["action"] == "pickup"
+    snapshot["sequence"] += 1
+    paused = await c.post("/api/decision", headers=AUTH, json=snapshot)
+    assert paused.json()["action"] == "wait" and "Пауза" in paused.json()["say"]
+    await c.post("/api/command", headers=AUTH, json={"mode": "follow"})
+    snapshot["sequence"] += 1
+    assert (await c.post("/api/decision", headers=AUTH, json=snapshot)).json()["action"] == "follow"
+    status = (await c.get("/api/status", headers=AUTH)).json()
+    assert status["request_interval_seconds"] == 30

@@ -83,6 +83,7 @@ $("pair-form").addEventListener("submit", async e => {
     lastStatus = s;
     $("provider").value = s.provider === "offline" ? "openai" : s.provider;
     $("model").value = s.model || (s.provider === "gemini" ? "" : "gpt-4.1-mini");
+    $("api-interval").value = s.request_interval_seconds;
     providerFields();
     clearGeminiModels();
     $("objective").value = s.objective;
@@ -104,14 +105,16 @@ $("provider-form").addEventListener("submit", async e => {
   const key = $("api-key").value.trim();
   $("api-key").value = "";
   try {
-    await api("/api/provider", {provider: $("provider").value, model: $("model").value.trim(), api_key: key});
+    await api("/api/provider", {provider: $("provider").value, model: $("model").value.trim(), api_key: key,
+      request_interval_seconds: Number($("api-interval").value)});
     notice("Настройки применены. Ключ будет проверен первым запросом AI из игры. Управление остановлено.");
     await refresh();
   } catch (error) { notice(error.message, true); }
 });
 async function command(mode) {
   if (mode === "ai" && (!lastStatus || lastStatus.provider !== $("provider").value
-      || lastStatus.model !== $("model").value.trim() || $("api-key").value.trim())) {
+      || lastStatus.model !== $("model").value.trim()
+      || lastStatus.request_interval_seconds !== Number($("api-interval").value) || $("api-key").value.trim())) {
     notice("Сначала нажмите «Применить настройки» для выбранного провайдера и модели.", true);
     return;
   }
@@ -146,9 +149,9 @@ $("check-model").addEventListener("click", async () => {
   button.disabled = true;
   notice(`Проверяю Gemini / ${model}…`);
   try {
-    await api("/api/check/gemini", {model, api_key: key});
+    const result = await api("/api/check/gemini", {model, api_key: key});
     if (revision === modelListRevision && $("model").value.trim() === model && $("provider").value === "gemini") {
-      notice(`Gemini / ${model}: проверка прошла. Примените настройки, затем включите AI.`);
+      notice(`Gemini / ${model}: проверка прошла. ${result.checks.join("; ")}. Примените настройки, затем включите AI.`);
     }
   } catch (error) {
     if (revision === modelListRevision && $("model").value.trim() === model && $("provider").value === "gemini") {
