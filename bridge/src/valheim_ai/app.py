@@ -16,7 +16,7 @@ import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision
 from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited,
-                        decide, list_gemini_models, diagnose_gemini,
+                        decide, list_gemini_models, list_openai_models, diagnose_gemini,
                         API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .diagnostics import validation_diagnostics
 from . import __version__
@@ -33,7 +33,7 @@ class ModelListRequest(StrictModel):
     api_key: SecretStr = SecretStr("")
 
 
-class GeminiCheckRequest(ModelListRequest):
+class ProviderCheckRequest(ModelListRequest):
     model: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9._-]+$")
 
 
@@ -63,6 +63,7 @@ class State:
         self.last_seen = 0.0
         self.last_snapshot: Snapshot | None = None
         self.snapshot_error: dict | None = None
+        self.provider_error: dict | None = None
         self.events: deque[dict] = deque(maxlen=50)
 
     def event(self, source: str, message: str):
@@ -182,25 +183,34 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "actor": state.last_snapshot.actor.model_dump() if state.last_snapshot else None,
             "leader_id": state.last_snapshot.leader_id if state.last_snapshot else "",
             "snapshot_error": state.snapshot_error,
+            "provider_error": state.provider_error,
             "events": list(state.events),
         }
 
-    @app.post("/api/models/gemini", dependencies=[Depends(authenticate)])
-    async def models(settings: ModelListRequest):
-        key = settings.api_key.get_secret_value() or state.keys["gemini"]
+    @app.post("/api/models/{provider}", dependencies=[Depends(authenticate)])
+    async def models(provider: str, settings: ModelListRequest):
+        if provider not in state.keys:
+            raise HTTPException(404, "Неизвестный провайдер")
+        key = settings.api_key.get_secret_value() or state.keys[provider]
         if not key:
-            raise HTTPException(409, "Введите API-ключ Gemini или примените его в настройках")
+            raise HTTPException(409, "Введите API-ключ или примените его в настройках")
         try:
-            values = await asyncio.wait_for(list_gemini_models(state.client, key), DECISION_TIMEOUT)
+            loader = list_gemini_models if provider == "gemini" else list_openai_models
+            values = await asyncio.wait_for(loader(state.client, key), DECISION_TIMEOUT)
             return {"models": values}
         except (ProviderError, TimeoutError) as exc:
-            raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло") from None
+            message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
+            if isinstance(exc, ProviderError) and exc.diagnostic:
+                message += " Ответ API: " + exc.diagnostic
+            raise HTTPException(502, message) from None
 
-    @app.post("/api/check/gemini", dependencies=[Depends(authenticate)])
-    async def check_gemini(settings: GeminiCheckRequest):
-        key = settings.api_key.get_secret_value() or state.keys["gemini"]
+    @app.post("/api/check/{provider}", dependencies=[Depends(authenticate)])
+    async def check_provider(provider: str, settings: ProviderCheckRequest):
+        if provider not in state.keys:
+            raise HTTPException(404, "Неизвестный провайдер")
+        key = settings.api_key.get_secret_value() or state.keys[provider]
         if not key:
-            raise HTTPException(409, "Введите API-ключ Gemini или примените его в настройках")
+            raise HTTPException(409, "Введите API-ключ или примените его в настройках")
         # Explicit operator-triggered check uses the exact production adapter and schema,
         # but no game observations or control state. The result is never sent to the mod.
         probe = Snapshot(
@@ -209,9 +219,19 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                    "health": 1, "max_health": 1, "stamina": 0},
         )
         try:
-            checks = await asyncio.wait_for(diagnose_gemini(state.client, settings.model, key, probe), DECISION_TIMEOUT)
+            if provider == "gemini":
+                checks = await asyncio.wait_for(diagnose_gemini(state.client, settings.model, key, probe), DECISION_TIMEOUT)
+            else:
+                await asyncio.wait_for(decide(state.client, provider, settings.model, key,
+                                             "Проверка API. Верни wait, пустой target_id, duration=1 и короткое say.", probe), DECISION_TIMEOUT)
+                checks = ["Формат действий: OK"]
         except (ProviderError, TimeoutError) as exc:
-            raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло") from None
+            message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
+            if provider == "openai" and isinstance(exc, ProviderError) and exc.diagnostic:
+                message += " Ответ API: " + exc.diagnostic
+            raise HTTPException(502, message) from None
+        if state.provider == provider and state.model == settings.model and state.keys[provider] == key:
+            state.provider_error = None
         return {"ok": True, "model": settings.model, "checks": checks}
 
     @app.post("/api/provider", dependencies=[Depends(authenticate)])
@@ -223,6 +243,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.retry_after = 0.0
         state.next_ai_request = 0.0
         state.request_interval_seconds = settings.request_interval_seconds
+        state.provider_error = None
         state.provider = settings.provider
         state.model = settings.model
         state.revision += 1
@@ -265,6 +286,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         mode = state.command.mode
         source = "local"
         stop_for_api_error = False
+        api_attempted = False
+        api_error = None
         result = wait()
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
@@ -282,6 +305,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 result = wait("Не задан API-ключ")
             else:
                 state.busy = True
+                api_attempted = True
                 state.next_ai_request = time.monotonic() + state.request_interval_seconds
                 try:
                     result = await asyncio.wait_for(decide(
@@ -294,6 +318,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                     if isinstance(exc, ProviderUnavailable):
                         state.retry_after = time.monotonic() + 15
                     message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
+                    api_error = {"provider": state.provider, "model": state.model, "message": message,
+                                 "detail": exc.diagnostic if isinstance(exc, ProviderError) else ""}
                     result = wait(message)
                     source = "fallback"
                 finally:
@@ -302,12 +328,13 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if revision != state.revision or snapshot.sequence != state.last_sequence:
             result = wait("Команда изменилась; старый ответ отменён")
             source = "fallback"
-        elif stop_for_api_error:
-            # Missing models and exhausted quotas require operator input, not another cycle.
-            # Apply only to the still-current command; never stop a newer configuration.
-            state.command = Command(mode="stop", objective=state.command.objective)
-            state.revision += 1
-            result = wait("AI остановлен. " + result.say)
+        else:
+            if api_attempted:
+                state.provider_error = api_error
+            if stop_for_api_error:
+                state.command = Command(mode="stop", objective=state.command.objective)
+                state.revision += 1
+                result = wait("AI остановлен. " + result.say)
         result = validate_decision(result, snapshot)
         state.event(source, result.say or result.action.value)
         return DecisionReply(**result.model_dump(), sequence=snapshot.sequence,

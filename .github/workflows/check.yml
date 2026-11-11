@@ -25,6 +25,16 @@ jobs:
           PYTHONPATH: bridge/src
       - run: python scripts/smoke_bridge.py
       - run: node --check bridge/src/valheim_ai/static/app.js
+      - name: Validate Windows launcher syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $parseTokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          }
       - run: python scripts/bootstrap_mod.py
       - run: dotnet test mod/ValheimAIHelper.Tests/ValheimAIHelper.Tests.csproj -c Release -p:RestoreLockedMode=true
       - run: dotnet build mod/ValheimAIHelper/ValheimAIHelper.csproj -c Release -p:RestoreLockedMode=true

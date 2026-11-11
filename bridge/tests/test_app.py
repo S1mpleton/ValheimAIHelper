@@ -416,3 +416,47 @@ async def test_ai_interval_limits_calls_and_does_not_delay_local_follow(clients,
     assert (await c.post("/api/decision", headers=AUTH, json=snapshot)).json()["action"] == "follow"
     status = (await c.get("/api/status", headers=AUTH)).json()
     assert status["request_interval_seconds"] == 30
+
+
+async def test_openai_in_game_setup_check_and_unknown_provider_are_safe():
+    calls = []
+    def handle(request):
+        calls.append(request)
+        if request.method == 'GET':
+            return httpx.Response(200, json={'data': [{'id': 'gpt-6-luna'}]})
+        return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps({
+            'action': 'wait', 'target_id': '', 'duration': 1, 'say': 'Связь работает'
+        })}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost', headers=AUTH) as c:
+            assert (await c.post('/api/models/openai', json={})).status_code == 409
+            models = await c.post('/api/models/openai', json={'api_key': 'unit-key'})
+            assert models.json() == {'models': ['gpt-6-luna']}
+            checked = await c.post('/api/check/openai', json={'api_key': 'unit-key', 'model': 'gpt-6-luna'})
+            assert checked.json()['ok'] is True
+            assert len(calls) == 2
+            assert app.state.bridge.keys['openai'] == ''
+            assert app.state.bridge.command.mode == 'stop'
+            assert (await c.post('/api/models/other', json={})).status_code == 404
+            assert (await c.post('/api/check/other', json={'model': 'test'})).status_code == 404
+            assert len(calls) == 2
+
+
+async def test_actual_provider_error_is_visible_to_in_game_status_without_key(snapshot):
+    key = 'unit-secret-key'
+    def handle(request):
+        return httpx.Response(404, json={'error': {'status': 'NOT_FOUND', 'message': 'Please use current model, key=' + key}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
+        app = create_app(token=TOKEN, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost', headers=AUTH) as c:
+            await c.post('/api/decision', json=snapshot)
+            await c.post('/api/provider', json={'provider': 'gemini', 'model': 'old-model', 'api_key': key})
+            await c.post('/api/command', json={'mode': 'ai'})
+            snapshot['sequence'] += 1
+            await c.post('/api/decision', json=snapshot)
+            result = await c.get('/api/status')
+            assert 'Please use current model' in result.json()['provider_error']['detail']
+            assert key not in result.text
+            await c.post('/api/provider', json={'provider': 'gemini', 'model': 'new-model'})
+            assert (await c.get('/api/status')).json()['provider_error'] is None

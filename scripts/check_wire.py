@@ -21,6 +21,12 @@ async def main():
     assert original["actor"]["name"] == "Бьёрн"
     token = "wire-probe-local-token-not-a-provider-key"
     def provider(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "gpt-6-luna"}]})
+        if b"api-check" in request.content:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+                "action": "wait", "target_id": "", "duration": 1, "say": "Связь работает"
+            })}}]})
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
             "action": "move", "target_id": "", "duration": 2, "say": "Иду вперёд"
         })}}]})
@@ -42,7 +48,30 @@ async def main():
             assert moving.status_code == 200 and moving.json()["action"] == "move", moving.text
             result = subprocess.check_output(["dotnet", str(program), "--check-response", "3"], input=moving.content, timeout=10)
             assert result.strip() == b"ACCEPTED:move"
+            # These are the actual DTOs used by the in-game panel, not hand-written JSON.
+            settings = subprocess.check_output(["dotnet", str(program), "--ui-provider"], timeout=10)
+            configured = await client.post("/api/provider", content=settings, headers={"Content-Type": "application/json"})
+            assert configured.status_code == 200, configured.text
+            result = subprocess.check_output(["dotnet", str(program), "--read-ui-ok"], input=configured.content, timeout=10)
+            assert result.strip() == b"UI_OK"
+            status = await client.get("/api/status")
+            result = subprocess.check_output(["dotnet", str(program), "--read-ui-status"], input=status.content, timeout=10)
+            assert result.strip() == b"UI_STATUS_OK"
+            models = await client.post("/api/models/openai", json={})
+            assert models.status_code == 200, models.text
+            result = subprocess.check_output(["dotnet", str(program), "--read-ui-models"], input=models.content, timeout=10)
+            assert result.strip() == b"UI_MODELS_OK"
+            checked = await client.post("/api/check/openai", json={"model": "gpt-6-luna"})
+            assert checked.status_code == 200, checked.text
+            result = subprocess.check_output(["dotnet", str(program), "--read-ui-check"], input=checked.content, timeout=10)
+            assert result.strip() == b"UI_CHECK_OK"
+            stop = subprocess.check_output(["dotnet", str(program), "--ui-command", "stop"], timeout=10)
+            stopped = await client.post("/api/command", content=stop, headers={"Content-Type": "application/json"})
+            assert stopped.status_code == 200
+            result = subprocess.check_output(["dotnet", str(program), "--read-ui-ok"], input=stopped.content, timeout=10)
+            assert result.strip() == b"UI_OK"
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
+    print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
 
 
 if __name__ == "__main__":

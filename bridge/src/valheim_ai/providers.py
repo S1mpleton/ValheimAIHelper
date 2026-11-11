@@ -49,10 +49,29 @@ def safe_google_detail(response: httpx.Response, api_key: str) -> str:
     if api_key:
         message = message.replace(api_key, "[REDACTED]")
     message = re.sub(r"AIza[A-Za-z0-9_-]{20,}", "[REDACTED]", message)
+    message = re.sub(r"(?:sk-|AQ\.)[A-Za-z0-9_-]{20,}", "[REDACTED]", message)
     message = re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", message)
     message = re.sub(r"https?://\S+", "[URL]", message)
     message = re.sub(r"(?i)(api[_-]?key|access_token|token|key)\s*[=:]\s*[^\s,;]+", r"\1=[REDACTED]", message)
     return " ".join("".join(c if c.isprintable() else " " for c in message).split())[:600]
+
+
+def network_error_message(error: Exception) -> str:
+    if isinstance(error, (httpx.ConnectTimeout, httpx.ConnectError, httpx.ProxyError)):
+        return "Не удалось установить соединение с API. Проверьте доступ к сервису и настройки прокси/VPN."
+    return "API не ответил за отведённое время. Модель может быть перегружена; повторите позже."
+
+
+def gemini_generation_config(model: str, schema: dict | None = None) -> dict:
+    config = {"maxOutputTokens": 1024 if schema is not None else 64}
+    if schema is not None:
+        config.update(responseMimeType="application/json", responseJsonSchema=schema)
+    if model.startswith("gemini-2.5-flash"):
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+    elif model.startswith("gemini-3"):
+        # LOW is accepted by current 3.x models; MINIMAL is rejected by 3.8 Flash.
+        config["thinkingConfig"] = {"thinkingLevel": "low"}
+    return config
 
 
 def gemini_error_message(error: ProviderError) -> str:
@@ -117,7 +136,8 @@ async def request_api(client: httpx.AsyncClient, method: str, url: str, **kwargs
             continue
         if response.is_error:
             error = status_error(response.status_code, response)
-            key = kwargs.get("headers", {}).get("x-goog-api-key", "")
+            headers = kwargs.get("headers", {})
+            key = headers.get("x-goog-api-key", "") or headers.get("Authorization", "").removeprefix("Bearer ")
             if key:
                 error.diagnostic = safe_google_detail(response, key)
             raise error
@@ -149,8 +169,8 @@ async def list_gemini_models(client: httpx.AsyncClient, api_key: str) -> list[st
                 break
             seen_tokens.add(page_token)
         raise ProviderError("Не удалось получить полный список моделей")
-    except (httpx.RequestError, TimeoutError):
-        raise ProviderError("API недоступен или не ответил вовремя") from None
+    except (httpx.RequestError, TimeoutError) as exc:
+        raise ProviderError(network_error_message(exc)) from None
     except (ValueError, KeyError, TypeError, AttributeError):
         raise ProviderError("API вернул некорректный список моделей") from None
 
@@ -179,7 +199,8 @@ async def decide(
                 json={
                     "model": model,
                     "messages": messages,
-                    "max_completion_tokens": 400,
+                    "max_completion_tokens": 1024,
+                    **({"reasoning_effort": "low"} if model.startswith(("gpt-5", "gpt-6", "o3", "o4")) else {}),
                     "response_format": {
                         "type": "json_schema",
                         "json_schema": {"name": "valheim_action", "strict": True, "schema": schema},
@@ -188,15 +209,7 @@ async def decide(
             )
             text = response.json()["choices"][0]["message"]["content"]
         elif provider == "gemini":
-            generation = {
-                "maxOutputTokens": 1024,
-                "responseMimeType": "application/json",
-                "responseJsonSchema": schema,
-            }
-            # Our default Flash model supports disabling thinking for small control
-            # decisions. Avoid exhausting the output budget on hidden reasoning.
-            if model.startswith("gemini-2.5-flash"):
-                generation["thinkingConfig"] = {"thinkingBudget": 0}
+            generation = gemini_generation_config(model, schema)
             response = await request_api(client, "POST",
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": api_key},
@@ -223,8 +236,8 @@ async def decide(
         error = ProviderModelNotFound(message, gemini_not_found=exc.gemini_not_found)
         error.diagnostic = exc.diagnostic
         raise error from None
-    except (httpx.RequestError, TimeoutError):
-        raise ProviderError("API недоступен или не ответил вовремя") from None
+    except (httpx.RequestError, TimeoutError) as exc:
+        raise ProviderError(network_error_message(exc)) from None
     except (ValueError, KeyError, IndexError, TypeError, ValidationError):
         raise ProviderError("Модель вернула недопустимое действие; персонаж остановлен") from None
 
@@ -241,9 +254,7 @@ async def diagnose_gemini(client: httpx.AsyncClient, model: str, api_key: str, p
             raise ProviderError("Карточка модели не подтверждает поддержку generateContent")
         completed.append("Карточка модели: OK")
         stage = "Простая генерация (POST generateContent, v1beta)"
-        generation = {"maxOutputTokens": 32}
-        if model.startswith("gemini-2.5-flash"):
-            generation["thinkingConfig"] = {"thinkingBudget": 0}
+        generation = gemini_generation_config(model)
         await request_api(client, "POST", url + ":generateContent", headers={"x-goog-api-key": api_key}, json={
             "contents": [{"role": "user", "parts": [{"text": "Reply with OK."}]}],
             "generationConfig": generation,
@@ -259,7 +270,24 @@ async def diagnose_gemini(client: httpx.AsyncClient, model: str, api_key: str, p
         if exc.diagnostic:
             message += " Ответ Google: " + exc.diagnostic
         raise ProviderError(message) from None
-    except (httpx.RequestError, TimeoutError):
-        raise ProviderError("; ".join(completed + [stage + ": API недоступен или не ответил вовремя"])) from None
+    except (httpx.RequestError, TimeoutError) as exc:
+        raise ProviderError("; ".join(completed + [stage + ": " + network_error_message(exc)])) from None
     except (ValueError, KeyError, TypeError, AttributeError):
         raise ProviderError("; ".join(completed + [stage + ": некорректный ответ API"])) from None
+
+
+async def list_openai_models(client: httpx.AsyncClient, api_key: str) -> list[str]:
+    try:
+        response = await request_api(client, 'GET', 'https://api.openai.com/v1/models', headers={'Authorization': 'Bearer ' + api_key})
+        models = set()
+        for item in response.json().get('data', []):
+            name = item.get('id', '')
+            if (re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', name)
+                    and name.startswith(('gpt-', 'o1', 'o3', 'o4'))
+                    and not any(part in name for part in ('audio', 'realtime', 'image', 'transcribe', 'tts', 'search'))):
+                models.add(name)
+        return sorted(models)
+    except (httpx.RequestError, TimeoutError) as exc:
+        raise ProviderError(network_error_message(exc)) from None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ProviderError('API вернул некорректный список моделей') from None

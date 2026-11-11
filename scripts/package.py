@@ -18,7 +18,7 @@ def main():
         parser.error("Plugin version is missing")
     output = root / f"dist/ValheimAIHelper-windows-{version}.zip"
     output.parent.mkdir(exist_ok=True)
-    files = [root / "README.md", root / "LICENSE", root / "bridge/requirements.txt", root / "scripts/start-windows.ps1"]
+    files = [root / "README.md", root / "LICENSE", root / "bridge/requirements.txt", root / "scripts/start-windows.ps1", root / "scripts/start-bridge.ps1"]
     files += sorted((root / "docs").glob("*.md"))
     files += sorted(p for p in (root / "bridge/src/valheim_ai").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:

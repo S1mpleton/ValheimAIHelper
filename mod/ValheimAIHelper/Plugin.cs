@@ -10,9 +10,9 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.1.4")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.2.0")]
 [DefaultExecutionOrder(-100)]
-public sealed class Plugin : BaseUnityPlugin
+public sealed partial class Plugin : BaseUnityPlugin
 {
     private ConfigEntry<string> bridgeUrl = null!, bridgeToken = null!, leaderName = null!;
     private ConfigEntry<bool> allowCombat = null!;
@@ -20,10 +20,10 @@ public sealed class Plugin : BaseUnityPlugin
     private readonly ActionExecutor executor = new();
     private static Plugin? instance;
     private Harmony? harmony;
-    private bool inputPatchReady;
+    private bool inputPatchReady, panelFocusReady;
     private Player? actor;
     private PlayerController? controller;
-    private bool active, showPanel;
+    private bool active, showPanel, bridgeSessionReady;
     private CursorLockMode oldCursorLock;
     private bool oldCursorVisible;
     private long? leaderId;
@@ -43,21 +43,28 @@ public sealed class Plugin : BaseUnityPlugin
         allowCombat = Config.Bind("Player", "AllowCombat", false, "Allow basic melee against hostile monsters targeting you/leader.");
         interval = Config.Bind("Bridge", "DecisionInterval", 4f, new ConfigDescription("Minimum seconds between decisions (API costs apply).", new AcceptableValueRange<float>(3f, 60f)));
         instance = this;
+        InitPanel();
         harmony = new Harmony("dev.valheim.aihelper.input");
         try
         {
+            harmony.PatchAll(typeof(PanelInputFocusPatch));
+            panelFocusReady = true;
             harmony.PatchAll(typeof(ControlInputPatch));
             inputPatchReady = true;
         }
         catch (Exception ex) { Logger.LogError("Native input hook is incompatible with this game: " + ex); }
+        try { harmony.PatchAll(typeof(EscMenuPatch)); }
+        catch (Exception ex) { Logger.LogWarning("Esc menu entry: " + ex.GetType().Name + ". Use F8."); }
         Logger.LogInfo("Valheim version: " + global::Version.GetVersionString() + "; build references: 0.221.4");
         Logger.LogInfo("AI Helper loaded. Control is OFF. F8 panel; F9 emergency release.");
     }
 
     private void Update()
     {
-        if (Input.GetKeyDown(KeyCode.F9)) { DisableControl("Ручное управление (F9)"); SetPanel(false); }
-        if (Input.GetKeyDown(KeyCode.F8)) SetPanel(!showPanel);
+        if (Input.GetKeyDown(KeyCode.F9)) { StopFromPanel(); SetPanel(false); }
+        if (Input.GetKeyDown(KeyCode.F8)) { if (showPanel) SetPanel(false); else OpenPanelFromMenu(); }
+        if (showPanel && Input.GetKeyDown(KeyCode.Escape)) SetPanel(false);
+        UpdatePanel();
         if (active && (actor == null || !actor || actor != Player.m_localPlayer || !actor.IsOwner() || actor.IsDead() ||
             controller == null || !controller || !controller.enabled))
             DisableControl("Нет локального управления персонажем или мир закрыт. AI отключён.");
@@ -98,8 +105,9 @@ public sealed class Plugin : BaseUnityPlugin
         session = Guid.NewGuid().ToString("N");
         sequence = 0;
         active = true;
+        bridgeSessionReady = false;
         Logger.LogInfo("Native input control enabled for local owner; PlayerController remains enabled.");
-        status = "Подключаю мост. Затем выберите режим в локальной панели.";
+        status = "Подключаю помощника…";
         loop = StartCoroutine(DecisionLoop());
         return true;
     }
@@ -107,6 +115,7 @@ public sealed class Plugin : BaseUnityPlugin
     private void DisableControl(string reason)
     {
         active = false;
+        bridgeSessionReady = false;
         if (pending != null) { pending.Abort(); pending = null; }
         if (loop != null) { StopCoroutine(loop); loop = null; }
         try { executor.Stop(actor, reason); }
@@ -123,8 +132,9 @@ public sealed class Plugin : BaseUnityPlugin
     {
         input = default;
         var plugin = instance;
-        if (plugin == null || !plugin.active || player != plugin.actor ||
-            player != Player.m_localPlayer || !player.IsOwner()) return false;
+        if (plugin == null || player != Player.m_localPlayer || !player.IsOwner()) return false;
+        if (plugin.showPanel) return true;
+        if (!plugin.active || player != plugin.actor) return false;
         input = plugin.executor.Input;
         return true;
     }
@@ -146,6 +156,12 @@ public sealed class Plugin : BaseUnityPlugin
     {
         while (active && actor != null && actor)
         {
+            if (bridgeSessionReady && (showPanel || Menu.IsVisible()))
+            {
+                executor.Stop(actor, "Пауза: открыто меню помощника");
+                yield return new WaitForSecondsRealtime(.25f);
+                continue;
+            }
             // No controls are held while the API is thinking or the connection is down.
             string previousResult = executor.Result;
             executor.Stop(actor, "Ожидаю решение");
@@ -164,10 +180,12 @@ public sealed class Plugin : BaseUnityPlugin
                 {
                     request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
                     request.downloadHandler = new DownloadHandlerBuffer();
+                    request.redirectLimit = 0;
                     request.SetRequestHeader("Content-Type", "application/json");
                     request.SetRequestHeader("Authorization", "Bearer " + bridgeToken.Value);
                     // Bridge budget: 100s including retries; leave transport headroom.
                     request.timeout = 110;
+                    if (!bridgeSessionReady) request.timeout = 8;
                     pending = request;
                     yield return request.SendWebRequest();
                     pending = null;
@@ -187,6 +205,7 @@ public sealed class Plugin : BaseUnityPlugin
                         catch (Exception) { status = "Некорректный ответ моста"; }
                         if (DecisionPolicy.Accept(decision, observation.Data, allowCombat.Value))
                         {
+                            bridgeSessionReady = true;
                             executor.Set(decision!, observation, actor);
                             status = decision!.say.Length > 0 ? decision.say : decision.action;
                             lastFailure = "";
@@ -212,8 +231,9 @@ public sealed class Plugin : BaseUnityPlugin
             oldCursorVisible = Cursor.visible;
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
+            PanelOpened();
         }
-        else { Cursor.lockState = oldCursorLock; Cursor.visible = oldCursorVisible; }
+        else { Cursor.lockState = oldCursorLock; Cursor.visible = oldCursorVisible; Game.Unpause(); }
     }
 
     private void OnGUI()
@@ -221,32 +241,21 @@ public sealed class Plugin : BaseUnityPlugin
         if (!showPanel) return;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-        window = GUILayout.Window(GetInstanceID(), window, DrawPanel, "Valheim AI Helper · 0.1.4");
-    }
-
-    private void DrawPanel(int id)
-    {
-        GUILayout.Label("Этот мод управляет ТЕКУЩИМ персонажем.\nВключайте его только в отдельном клиенте напарника.");
-        GUILayout.Space(10);
-        GUILayout.Label(active ? "Управление AI: включено" : "Управление AI: выключено");
-        statusStyle = statusStyle ?? new GUIStyle(GUI.skin.label) { wordWrap = true };
-        GUILayout.Label(status, statusStyle, GUILayout.MaxWidth(440));
-        GUILayout.Label("Действие: " + executor.Result);
-        GUILayout.Space(10);
-        if (!active && GUILayout.Button("Включить для этого персонажа"))
-        { if (EnableControl()) SetPanel(false); }
-        if (active && GUILayout.Button("Отключить и вернуть управление (F9)")) DisableControl("Ручное управление");
-        bool combat = GUILayout.Toggle(allowCombat.Value, "Разрешить простой ближний бой (экспериментально)");
-        if (combat != allowCombat.Value) allowCombat.Value = combat;
-        GUILayout.Label("Задача и GPT/Gemini выбираются в локальной веб-панели.\nF8 — закрыть панель. F9 — немедленно отключить AI.");
-        if (GUILayout.Button("Закрыть")) SetPanel(false);
-        GUI.DragWindow();
+        GUI.depth = -1000;
+        window.width = Mathf.Min(660, Screen.width - 32);
+        window.height = Mathf.Min(uiSettings ? 720 : 430, Screen.height - 40);
+        window.x = Mathf.Clamp(window.x, 16, Mathf.Max(16, Screen.width - window.width - 16));
+        window.y = Mathf.Clamp(window.y, 20, Mathf.Max(20, Screen.height - window.height - 20));
+        window = GUILayout.Window(GetInstanceID(), window, DrawSimplePanel, "AI-помощник");
     }
 
     private void OnDestroy()
     {
         DisableControl("Мод выгружен");
         SetPanel(false);
+        uiKey = "";
+        uiClient?.Dispose();
+        menuIntegration?.Dispose();
         harmony?.UnpatchSelf();
         if (instance == this) instance = null;
     }

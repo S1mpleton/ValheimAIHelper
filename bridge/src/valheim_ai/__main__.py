@@ -37,8 +37,9 @@ def main():
         print("Mod paired. Restart Valheim if it is running.")
     print("Valheim AI Helper", __version__)
     print(f"Pairing code file: {args.data_dir.resolve() / 'bridge-token'}")
-    print("Open the local dashboard on this computer at port", args.port)
-    print("API keys entered in the dashboard remain in memory until shutdown.")
+    print("In Valheim: Esc -> AI Helper (or F8).")
+    print("Optional diagnostic dashboard port:", args.port)
+    print("API keys entered in the game or dashboard remain in memory until shutdown.")
     uvicorn.run(create_app(token=token), host="127.0.0.1", port=args.port, access_log=False)
 
 

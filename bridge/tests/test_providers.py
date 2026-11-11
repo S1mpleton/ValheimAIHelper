@@ -149,7 +149,7 @@ async def test_api_attempt_deadline(monkeypatch):
     async def handle(request):
         await asyncio.Event().wait()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        with pytest.raises(ProviderError, match="вовремя"):
+        with pytest.raises(ProviderError, match="не ответил"):
             await providers.list_gemini_models(client, "secret")
 
 
@@ -201,3 +201,40 @@ def test_diagnostic_redacts_before_truncation_and_does_not_show_headers_or_bodie
     assert key not in detail and "private" not in detail
     assert len(detail) <= 600
     assert safe_google_detail(httpx.Response(404, text="<html>private-key</html>"), "private-key") == ""
+
+
+@pytest.mark.parametrize('provider,model', [('openai', 'gpt-6-luna'), ('gemini', 'gemini-3.8-flash')])
+async def test_current_models_use_low_reasoning_and_structured_actions(snapshot, provider, model):
+    def handle(request):
+        body = json.loads(request.content)
+        if provider == 'openai':
+            assert body['reasoning_effort'] == 'low'
+            assert body['max_completion_tokens'] >= 1024
+            return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(VALID)}}]})
+        assert body['generationConfig']['thinkingConfig'] == {'thinkingLevel': 'low'}
+        return httpx.Response(200, json={'candidates': [{'content': {'parts': [{'text': json.dumps(VALID)}]}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert (await decide(client, provider, model, 'unit-key', 'follow', Snapshot(**snapshot))).action == 'follow'
+
+
+async def test_openai_list_filters_non_chat_models_and_uses_header_auth():
+    from valheim_ai.providers import list_openai_models
+    def handle(request):
+        assert request.headers['authorization'] == 'Bearer unit-key'
+        assert 'unit-key' not in str(request.url)
+        return httpx.Response(200, json={'data': [{'id': name} for name in [
+            'gpt-6-luna', 'gpt-4.1-mini', 'gpt-image-1', 'gpt-audio', 'gpt-realtime', 'embedding-model', 'invalid/path'
+        ]]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await list_openai_models(client, 'unit-key') == ['gpt-4.1-mini', 'gpt-6-luna']
+
+
+async def test_openai_diagnostic_redacts_bearer_key(snapshot):
+    key = 'unit-private-openai-key'
+    def handle(request):
+        return httpx.Response(400, json={'error': {'message': 'invalid request with key=' + key}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ProviderError) as error:
+            await decide(client, 'openai', 'gpt-6-luna', key, 'wait', Snapshot(**snapshot))
+    assert key not in error.value.diagnostic
+    assert '[REDACTED]' in error.value.diagnostic

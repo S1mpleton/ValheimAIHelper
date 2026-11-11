@@ -1,10 +1,12 @@
 param(
     [string]$GameDir = "${env:ProgramFiles(x86)}\Steam\steamapps\common\Valheim",
-    [ValidateRange(1024, 65535)][int]$Port = 8765
+    [ValidateRange(1024, 65535)][int]$Port = 8765,
+    [switch]$BridgeOnly
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
 Set-Location $Root
+if (-not $BridgeOnly) {
 if (Get-Process -Name valheim -ErrorAction SilentlyContinue) {
     throw 'Close Valheim before installing/pairing the plugin, then run this script again.'
 }
@@ -33,6 +35,8 @@ if (Test-Path $Destination) {
 }
 Copy-Item $Plugin $Destination -Force
 
+}
+
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 if (-not (Test-Path $Python)) {
     if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -49,7 +53,9 @@ if (-not (Test-Path $Python)) {
 & $Python -m pip install --require-hashes -r (Join-Path $Root 'bridge\requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed. Check Internet access and the Python version.' }
 $env:PYTHONPATH = (Join-Path $Root 'bridge\src') + [IO.Path]::PathSeparator + $env:PYTHONPATH
-Write-Host 'Starting local bridge. Keep this window open. Close Valheim before pairing, then launch it modded.'
-Write-Host 'Dashboard: open your browser on this computer, address 127.0.0.1, port' $Port
-& $Python -m valheim_ai --game-dir $GameDir --data-dir (Join-Path $Root '.local') --port $Port
+Write-Host 'Starting AI service. Keep this window open. In Valheim: Esc -> AI Helper (or F8).'
+Write-Host 'Controls are inside the game. Diagnostic web dashboard port:' $Port
+$BridgeArgs = @('--data-dir', (Join-Path $Root '.local'), '--port', $Port)
+if (-not $BridgeOnly) { $BridgeArgs += @('--game-dir', $GameDir) }
+& $Python -m valheim_ai @BridgeArgs
 if ($LASTEXITCODE -ne 0) { throw 'Bridge exited with an error. Read the message above.' }
