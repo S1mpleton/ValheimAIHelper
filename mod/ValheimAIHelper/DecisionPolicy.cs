@@ -5,9 +5,9 @@ namespace ValheimAIHelper;
 
 public static class DecisionPolicy
 {
-    public static bool Accept(Decision? d, Snapshot s, bool allowCombat)
+    public static bool Accept(Decision? d, Snapshot s, bool allowCombat, int minimumCommandRevision = 0)
     {
-        if (d == null || d.protocol_version != 1 || d.sequence != s.sequence ||
+        if (d == null || d.protocol_version != 1 || d.sequence != s.sequence || d.command_revision < minimumCommandRevision ||
             float.IsNaN(d.duration) || float.IsInfinity(d.duration) ||
             d.duration < .25f || d.duration > 3f || d.say == null || d.say.Length > 240 ||
             d.target_id == null || d.target_id.Length > 100 || (d.plan_id != null && d.plan_id.Length > 80))

@@ -173,6 +173,10 @@ public sealed partial class Plugin
     private IEnumerator StartMode(string mode)
     {
         int operation = ++uiOperation;
+        bool completed = false;
+        // Configuring a provider intentionally stops the bridge. Don't confuse
+        // that handshake with a stop issued after this new command is accepted.
+        requestedMode = ""; requestedRevision = 0;
         uiBusy = true; uiError = ""; uiMessage = "Подключаю помощника…";
         try
         {
@@ -189,8 +193,14 @@ public sealed partial class Plugin
             if (!active || !bridgeSessionReady || operation != uiOperation)
             { if (operation == uiOperation) uiError = "Нет данных персонажа от службы AI. " + status; yield break; }
             bool started = false;
-            yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = mode, objective = uiObjective }, value => started = value.ok, error => uiError = error, 8);
+            yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = mode, objective = uiObjective }, value =>
+            {
+                if (operation != uiOperation) return;
+                started = value.ok;
+                if (started) { requestedMode = mode; requestedRevision = value.revision; }
+            }, error => uiError = error, 8);
             if (!started || operation != uiOperation) yield break;
+            completed = true;
             AddLog("command", mode + ": " + uiObjective);
             uiSettings = false;
             uiMessage = mode == "follow" ? "Помощник следует за лидером." : "AI выполняет задачу.";
@@ -198,7 +208,14 @@ public sealed partial class Plugin
             SetPanel(false);
             nextUiPoll = 0;
         }
-        finally { if (operation == uiOperation) uiBusy = false; }
+        finally
+        {
+            if (operation == uiOperation)
+            {
+                uiBusy = false;
+                if (!completed && active) DisableControl("Команда не запущена. " + uiError);
+            }
+        }
     }
 
     private void StopFromPanel()

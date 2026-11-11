@@ -49,4 +49,13 @@ public class CompanionTests
         copy.destination!.x = 31; Assert.False(DecisionPolicy.Accept(copy, s, false));
         copy.destination.x = float.NaN; Assert.False(DecisionPolicy.Accept(copy, s, false));
     }
+
+    [Fact] public void ReplyFromBeforeAcknowledgedChatCommandCannotRestoreOldControls()
+    {
+        var s = new Snapshot { sequence = 1 };
+        var old = new Decision { protocol_version = 1, sequence = 1, command_revision = 4, action = "wait", target_id = "", say = "", duration = 1, mode = "stop" };
+        Assert.False(DecisionPolicy.Accept(old, s, false, minimumCommandRevision: 5));
+        old.command_revision = 5;
+        Assert.True(DecisionPolicy.Accept(old, s, false, minimumCommandRevision: 5));
+    }
 }

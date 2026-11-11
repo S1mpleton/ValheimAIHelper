@@ -2,7 +2,7 @@
 
 AI-напарник для Windows / Steam. Мод управляет обычным персонажем во втором клиенте Valheim. Управление: **Esc → Управление персонажем**, резервная клавиша **F8**, немедленный стоп **F9**.
 
-[Скачать Windows 0.3.0](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.3.0/ValheimAIHelper-windows-0.3.0.zip) · [Релиз и исходники](https://github.com/S1mpleton/ValheimAIHelper/releases/tag/v0.3.0) · [SHA256](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.3.0/ValheimAIHelper-windows-0.3.0.zip.sha256)
+[Скачать Windows 0.3.1](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.3.1/ValheimAIHelper-windows-0.3.1.zip) · [Релиз и исходники](https://github.com/S1mpleton/ValheimAIHelper/releases/tag/v0.3.1) · [SHA256](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.3.1/ValheimAIHelper-windows-0.3.1.zip.sha256)
 
 ## Установка и обновление
 

@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.3.0")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.3.1")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -31,7 +31,8 @@ public sealed partial class Plugin : BaseUnityPlugin
     private UnityWebRequest? pending;
     private string session = "", status = "F8 — панель. F9 — ручное управление.";
     private string lastFailure = "";
-    private int sequence;
+    private int sequence, requestedRevision;
+    private string requestedMode = "";
     private Rect window = new(20, 80, 480, 340);
     private GUIStyle? statusStyle;
 
@@ -111,6 +112,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         controller = input;
         session = Guid.NewGuid().ToString("N");
         sequence = 0;
+        requestedRevision = 0; requestedMode = "";
         active = true;
         bridgeSessionReady = false;
         Logger.LogInfo("Native input control enabled for local owner; PlayerController remains enabled.");
@@ -122,6 +124,7 @@ public sealed partial class Plugin : BaseUnityPlugin
     private void DisableControl(string reason)
     {
         active = false;
+        requestedRevision = 0; requestedMode = "";
         bridgeSessionReady = false;
         if (pending != null) { pending.Abort(); pending = null; }
         if (loop != null) { StopCoroutine(loop); loop = null; }
@@ -215,9 +218,15 @@ public sealed partial class Plugin : BaseUnityPlugin
                         Decision? decision = null;
                         try { decision = WireJson.Deserialize<Decision>(request.downloadHandler.text); }
                         catch (Exception) { status = "Некорректный ответ моста"; }
-                        if (DecisionPolicy.Accept(decision, observation.Data, allowCombat.Value))
+                        if (DecisionPolicy.Accept(decision, observation.Data, allowCombat.Value, requestedRevision))
                         {
                             bridgeSessionReady = true;
+                            if (decision!.mode == "stop" && requestedMode.Length > 0)
+                            {
+                                AddLog("command", "Служба остановила AI; возвращено ручное управление.");
+                                DisableControl("AI остановлен службой. Управление возвращено вам; причина во вкладке «Журнал».");
+                                yield break;
+                            }
                             executor.Set(decision!, observation, actor);
                             status = decision!.say.Length > 0 ? decision.say : decision.action;
                             LogMotor(decision, observation);

@@ -83,4 +83,4 @@ jobs:
             echo "Release $tag already exists; preserving published assets."
             exit 0
           fi
-          gh release create "$tag" "ValheimAIHelper-windows-$version.zip" "ValheimAIHelper-windows-$version.zip.sha256" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Valheim AI Helper $version" --notes-file ../docs/release-0.3.0.md
+          gh release create "$tag" "ValheimAIHelper-windows-$version.zip" "ValheimAIHelper-windows-$version.zip.sha256" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Valheim AI Helper $version" --notes-file "../docs/release-$version.md"

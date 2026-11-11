@@ -40,7 +40,7 @@ def main():
                     except OSError:
                         if time.monotonic() > deadline: raise
                         time.sleep(.2)
-                assert health["version"] == "0.3.0", health
+                assert health["version"] == "0.3.1", health
                 req = urllib.request.Request(base + "/api/status", headers={"Authorization": "Bearer " + token})
                 with opener.open(req) as r: status = json.load(r)
                 assert status["mode"] == "stop" and not status["keys_present"]["openai"]
