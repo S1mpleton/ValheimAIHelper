@@ -16,9 +16,10 @@ public sealed partial class Plugin
     private string uiProvider = "gemini", uiModel = "", uiKey = "", uiObjective = "", uiInterval = "20";
     private string uiMessage = "", uiError = "";
     private string[] uiModels = Array.Empty<string>();
-    private bool uiBusy, uiPolling, uiHydrated, uiSettings, uiModelList;
+    private bool uiBusy, uiPolling, uiHydrated, uiSettings, uiModelList, uiJournal;
     private float nextUiPoll;
     private int uiOperation;
+    private string loggedUiError = "";
     private Vector2 panelScroll, modelScroll;
     private GUIStyle? titleStyle, hintStyle, panelButtonStyle, panelErrorStyle;
 
@@ -65,13 +66,22 @@ public sealed partial class Plugin
         float height = Mathf.Min(700, Screen.height - 40);
         window = new Rect((Screen.width - width) / 2, (Screen.height - height) / 2, width, height);
         if (Player.m_localPlayer) Game.Pause();
+        try
+        {
+            nativeWindow ??= new NativeControlWindow(this);
+            nativeWindow.Open();
+        }
+        catch (Exception ex) { AddLog("ui", "Штатные элементы меню недоступны: " + ex.GetType().Name + ". Открыта резервная панель F8."); }
         nextUiPoll = 0;
         StartCoroutine(RefreshPanelStatus());
     }
 
     private void UpdatePanel()
     {
-        if (showPanel && !uiPolling && Time.realtimeSinceStartup >= nextUiPoll)
+        if (uiError != loggedUiError) { loggedUiError = uiError; if (uiError.Length > 0) AddLog("error", uiError); }
+        try { nativeWindow?.Refresh(); }
+        catch (Exception ex) { nativeWindow?.Dispose(); AddLog("ui", "Ошибка игрового окна: " + ex.GetType().Name + ". Используется резервная панель."); }
+        if ((showPanel || active) && !uiPolling && Time.realtimeSinceStartup >= nextUiPoll)
             StartCoroutine(RefreshPanelStatus());
     }
 
@@ -86,6 +96,7 @@ public sealed partial class Plugin
             {
                 if (operation != uiOperation) return;
                 bridgeStatus = value;
+                ImportEvents(value);
                 if (value.provider_error != null)
                     uiError = value.provider_error.message + (!string.IsNullOrEmpty(value.provider_error.detail) ? " Ответ API: " + value.provider_error.detail : "");
                 if (!uiHydrated)
@@ -131,6 +142,7 @@ public sealed partial class Plugin
         if (uiClient == null || !ValidateAi(out int seconds)) yield break;
         bool ok = false, keyPresent = false;
         var options = new ProviderOptions { provider = uiProvider, model = uiModel.Trim(), api_key = uiKey.Trim(), request_interval_seconds = seconds };
+        journal.RegisterSecret(options.api_key);
         yield return uiClient.Request<BridgeOk>("/api/provider", options, value => { ok = value.ok; keyPresent = value.key_present; }, error => { if (operation == uiOperation) uiError = error; });
         options.api_key = "";
         if (operation != uiOperation || !ok) yield break;
@@ -179,6 +191,7 @@ public sealed partial class Plugin
             bool started = false;
             yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = mode, objective = uiObjective }, value => started = value.ok, error => uiError = error, 8);
             if (!started || operation != uiOperation) yield break;
+            AddLog("command", mode + ": " + uiObjective);
             uiSettings = false;
             uiMessage = mode == "follow" ? "Помощник следует за лидером." : "AI выполняет задачу.";
             if (Menu.instance) Menu.instance.Hide();
@@ -216,6 +229,7 @@ public sealed partial class Plugin
         try
         {
             if (uiClient == null) yield break;
+            journal.RegisterSecret(uiKey.Trim());
             yield return uiClient.Request<ModelListReply>("/api/models/" + uiProvider, new ModelListRequest { api_key = uiKey.Trim() }, value =>
             {
                 if (operation != uiOperation) return;
@@ -239,6 +253,7 @@ public sealed partial class Plugin
         try
         {
             if (uiClient == null || !ValidateAi(out _)) yield break;
+            journal.RegisterSecret(uiKey.Trim());
             yield return uiClient.Request<ModelCheckReply>("/api/check/" + uiProvider, new ModelCheckRequest { model = uiModel.Trim(), api_key = uiKey.Trim() }, value =>
             {
                 if (operation == uiOperation) uiMessage = "Модель отвечает. " + string.Join("; ", value.checks ?? Array.Empty<string>());
@@ -255,12 +270,34 @@ public sealed partial class Plugin
         panelErrorStyle ??= new GUIStyle(statusStyle) { normal = { textColor = new Color(1f, .65f, .55f) } };
         panelButtonStyle ??= new GUIStyle(GUI.skin.button) { fontSize = 15, wordWrap = true, padding = new RectOffset(10, 10, 9, 9) };
         panelScroll = GUILayout.BeginScrollView(panelScroll, GUILayout.Height(window.height - 52));
-        GUILayout.Label("AI-помощник", titleStyle);
+        GUILayout.Label("Управление персонажем", titleStyle);
         string mode = !active ? "Остановлен — персонажем управляете вы" : bridgeStatus?.mode == "follow" ? "Следует за лидером" : bridgeStatus?.mode == "ai" ? "Выполняет задачу" : "Готов к команде";
         GUILayout.Label(mode, statusStyle);
         GUILayout.Label("Помощником становится текущий персонаж. Лидер — другой игрок рядом.", hintStyle);
         if (uiError.Length > 0) GUILayout.Label(uiError, panelErrorStyle);
         else if (uiMessage.Length > 0) GUILayout.Label(uiMessage, statusStyle);
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Персонаж", panelButtonStyle)) { uiSettings = uiJournal = false; }
+        if (GUILayout.Button("Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = false; }
+        if (GUILayout.Button("Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = false; }
+        GUILayout.EndHorizontal();
+        if (uiJournal)
+        {
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Копировать отчёт", panelButtonStyle)) CopyReport();
+            if (GUILayout.Button("Сохранить", panelButtonStyle)) SaveReport();
+            if (GUILayout.Button("Очистить", panelButtonStyle)) journal.Clear();
+            GUILayout.EndHorizontal();
+            GUILayout.TextArea(journal.Text, GUILayout.MinHeight(230));
+            if (GUILayout.Button("Перезапустить службу", panelButtonStyle)) { StopFromPanel(); StartLocalRuntime(); }
+        }
+        else
+        {
+        var leader = FindLeader();
+        if (GUILayout.Button("Лидер: " + (leader ? leader!.GetPlayerName() : "не выбран") + " · сменить", panelButtonStyle)) SelectNextLeader();
+        allowCombat.Value = GUILayout.Toggle(allowCombat.Value, "Разрешить бой и защиту лидера");
+        autoSurvival.Value = GUILayout.Toggle(autoSurvival.Value, "Автоматически есть доступную еду");
+        allowChat.Value = GUILayout.Toggle(allowChat.Value, "Принимать !ai команды из чата выбранного лидера");
         GUILayout.Space(12);
         GUILayout.Label("Что нужно сделать?", statusStyle);
         uiObjective = GUILayout.TextArea(uiObjective, 1000, GUILayout.Height(70));
@@ -276,6 +313,8 @@ public sealed partial class Plugin
         string connection = uiModel.Length > 0 ? (uiProvider == "gemini" ? "Gemini" : "OpenAI") + " · " + uiModel : "Нейросеть не подключена";
         if (GUILayout.Button((uiSettings ? "▼ " : "▶ ") + "Подключение: " + connection, panelButtonStyle)) uiSettings = !uiSettings;
         if (uiSettings) DrawConnectionSettings();
+        GUILayout.Label("Чат лидера: !ai следуй · !ai стоп · !ai статус · !ai <задача>", hintStyle);
+        }
         GUILayout.Space(10);
         if (GUILayout.Button("Назад в меню", panelButtonStyle))
         { SetPanel(false); if (Menu.instance) Menu.instance.Show(); }

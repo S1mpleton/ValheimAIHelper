@@ -52,9 +52,9 @@ internal sealed class BridgeUiClient : IDisposable
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     if (request.responseCode == 0)
-                        failure("Служба AI недоступна. Запустите start-bridge.ps1 из папки помощника.");
+                        failure("Служба AI запускается или недоступна. Проверьте вкладку «Журнал» и наличие папки runtime.");
                     else if (request.responseCode == 401)
-                        failure("Служба AI не сопряжена с этой игрой. Закройте игру и один раз запустите start-windows.ps1 с вашей папкой Valheim.");
+                        failure("Код локальной службы не совпадает. Перезапустите службу во вкладке «Журнал».");
                     else
                     {
                         string detail = "";

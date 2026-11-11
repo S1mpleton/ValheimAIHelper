@@ -20,6 +20,9 @@ if (-not (Test-Path (Join-Path $GameDir 'valheim.exe'))) {
 # Copy the prebuilt plugin, or use an already built one in a source checkout.
 $Plugin = Join-Path $Root 'plugin\ValheimAIHelper.dll'
 if (-not (Test-Path $Plugin)) {
+    $Plugin = Join-Path $Root 'BepInEx\plugins\ValheimAIHelper\ValheimAIHelper.dll'
+}
+if (-not (Test-Path $Plugin)) {
     $Plugin = Join-Path $Root 'mod\ValheimAIHelper\bin\Release\net48\ValheimAIHelper.dll'
 }
 if (-not (Test-Path $Plugin)) {
@@ -34,6 +37,12 @@ if (Test-Path $Destination) {
     }
 }
 Copy-Item $Plugin $Destination -Force
+$BundledRuntime = Join-Path (Split-Path $Plugin -Parent) 'runtime'
+if (Test-Path (Join-Path $BundledRuntime 'ValheimAIBridge.exe')) {
+    Copy-Item $BundledRuntime $PluginDir -Recurse -Force
+    Write-Host 'Plugin and bundled service installed. Start Valheim; Esc -> Character control (F8). No PowerShell service is needed.'
+    exit 0
+}
 
 }
 

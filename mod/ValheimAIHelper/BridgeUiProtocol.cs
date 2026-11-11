@@ -20,6 +20,14 @@ namespace ValheimAIHelper;
     [DataMember] public int request_interval_seconds = 20;
     [DataMember] public BridgeKeys keys_present = new();
     [DataMember] public ProviderFailure? provider_error;
+    [DataMember] public string instance_id = "";
+    [DataMember] public bool planning;
+    [DataMember] public BridgeEvent[] events = Array.Empty<BridgeEvent>();
+}
+[DataContract] public sealed class BridgeEvent
+{
+    [DataMember] public int id;
+    [DataMember] public string time = "", source = "", message = "";
 }
 [DataContract] public sealed class ProviderOptions
 {

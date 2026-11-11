@@ -7,9 +7,29 @@ public readonly struct ControlIntent
 {
     public readonly float X, Z, Magnitude;
     public readonly bool Attack;
+    public readonly bool AttackHold, Block, Jump, Run, Dodge;
+    public readonly float AimX, AimY, AimZ;
+    public readonly bool HasAim;
 
     private ControlIntent(float x, float z, float magnitude, bool attack)
-    { X = x; Z = z; Magnitude = magnitude; Attack = attack; }
+    { X = x; Z = z; Magnitude = magnitude; Attack = attack;
+      AttackHold = Block = Jump = Run = Dodge = HasAim = false; AimX = AimY = AimZ = 0; }
+
+    private ControlIntent(ControlIntent move, float x, float y, float z, bool hold, bool block, bool jump, bool run, bool dodge)
+    {
+        X = move.X; Z = move.Z; Magnitude = move.Magnitude; Attack = move.Attack;
+        AimX = x; AimY = y; AimZ = z; HasAim = x*x + y*y + z*z > .0001f;
+        AttackHold = hold; Block = block; Jump = jump; Run = run; Dodge = dodge;
+    }
+
+    public ControlIntent With(float aimX = 0, float aimY = 0, float aimZ = 0, bool hold = false,
+        bool block = false, bool jump = false, bool run = false, bool dodge = false)
+    {
+        if (!Finite(aimX) || !Finite(aimY) || !Finite(aimZ)) return default;
+        double length = Math.Sqrt((double)aimX*aimX + (double)aimY*aimY + (double)aimZ*aimZ);
+        float scale = length > .0001 ? (float)(1/length) : 0;
+        return new ControlIntent(this, aimX*scale, aimY*scale, aimZ*scale, hold, block, jump, run, dodge);
+    }
 
     public static ControlIntent Create(float x, float y, float z, bool attack)
     {

@@ -1,141 +1,226 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 
 namespace ValheimAIHelper;
 
+// Native input/UseItem/Interact only. No position, vitals, ownership or inventory writes.
 internal sealed class ActionExecutor
 {
     private Decision? decision;
     private Observation? observation;
-    private float expires, nextPath, nextAttack, lastProgress;
-    private Vector3 lastPosition;
-    private Vector3 moveTarget;
+    private float expires, nextPath, nextAttack, nextJump, nextSurvival, lastProgress, bowStarted;
+    private Vector3 lastPosition, moveTarget;
     private readonly List<Vector3> path = new();
+    private ItemDrop.ItemData? usedItem;
+    private int oldStack;
+    private float usedAt;
     public string Result { get; private set; } = "Ожидание";
+    public string PlanId { get; private set; } = "";
+    public string ActionStatus { get; private set; } = "";
     public ControlIntent Input { get; private set; }
 
     public void Set(Decision value, Observation from, Player player)
     {
-        decision = value;
+        bool same = decision != null && (value.plan_id ?? "") == PlanId && decision.action == value.action && decision.target_id == value.target_id && decision.source == value.source && decision.mode == value.mode;
         observation = from;
         expires = Time.realtimeSinceStartup + value.duration;
-        nextPath = 0;
+        if (same) return; // Preserve paths, draw time and completed one-shot steps on lease renewal.
+        decision = value;
+        PlanId = value.plan_id ?? "";
+        ActionStatus = "running";
+        nextPath = 0; bowStarted = 0; usedItem = null;
         lastProgress = Time.time;
         lastPosition = player.transform.position;
-        var forward = player.transform.forward;
-        forward.y = 0;
-        moveTarget = lastPosition + forward.normalized * 4f;
+        var forward = player.transform.forward; forward.y = 0;
+        moveTarget = value.destination != null ? new Vector3(value.destination.x, value.destination.y, value.destination.z) : lastPosition + forward.normalized * 4;
         path.Clear();
         Result = value.say.Length > 0 ? value.say : value.action;
     }
 
     public void Stop(Player? player, string reason)
     {
-        decision = null;
-        observation = null;
-        path.Clear();
-        Result = reason;
+        decision = null; observation = null; PlanId = ""; ActionStatus = "";
+        path.Clear(); bowStarted = 0; usedItem = null;
+        Result = reason; Input = default;
+    }
+
+    private void Finish(string result, bool success = true)
+    { Result = result; ActionStatus = success ? "success" : "blocked"; Input = default; }
+    public void Pause() { Input = default; lastProgress = Time.time; nextPath = 0; }
+
+    public ControlIntent ConsumeInput()
+    {
+        var value = Input;
+        Input = ControlIntent.Create(value.X * value.Magnitude, 0, value.Z * value.Magnitude, false)
+            .With(value.AimX, value.AimY, value.AimZ, hold: value.AttackHold, block: value.Block, run: value.Run);
+        return value;
+    }
+
+    private void Controls(Vector3 movement, Vector3 aim = default, bool attack = false, bool hold = false,
+        bool block = false, bool jump = false, bool run = false, bool dodge = false)
+    { Input = ControlIntent.Create(movement.x, movement.y, movement.z, attack).With(aim.x, aim.y, aim.z, hold, block, jump, run, dodge); }
+
+    public void Tick(Player player, Player? leader, bool allowCombat, bool survival)
+    {
         Input = default;
-    }
-
-    private void Controls(Player player, Vector3 worldDirection, bool attack)
-    {
-        Input = ControlIntent.Create(worldDirection.x, worldDirection.y, worldDirection.z, attack);
-    }
-
-    public void Tick(Player player, Player? leader, bool allowCombat)
-    {
-        Controls(player, Vector3.zero, false);
-        if (decision == null || observation == null || Time.realtimeSinceStartup >= expires) return;
-        if (!player.IsOwner() || player != Player.m_localPlayer ||
-            player.IsDead() || player.IsTeleporting() || player.IsAttached() || player.IsSwimming() ||
-            player.IsEncumbered() || player.IsSleeping() || player.InPlaceMode())
+        if (decision == null || observation == null) return;
+        if (Time.realtimeSinceStartup >= expires) { Finish("Нет свежих данных от службы; управление приостановлено", false); return; }
+        if (!player.IsOwner() || player != Player.m_localPlayer || player.IsDead() || player.IsTeleporting() ||
+            player.IsAttached() || player.IsSleeping() || player.InPlaceMode())
+        { Finish("Действие недоступно в текущем состоянии", false); return; }
+        if (decision.mode == "stop" || (string.IsNullOrEmpty(decision.mode) && decision.action == "wait" && decision.source == "local")) return;
+        if (survival && decision.action != "eat" && decision.action != "use") PrepareSurvival(player);
+        if (allowCombat && (decision.action == "follow" || decision.action == "wait" || decision.action == "move" || decision.action == "pickup" || decision.action == "interact"))
         {
-            Stop(player, "Действие недоступно в текущем состоянии");
-            return;
+            var threat = Character.GetAllCharacters().Where(c => Observation.IsEnemy(player, c, leader))
+                .Where(c => { var victim = c.GetBaseAI()?.GetTargetCreature(); return victim == player || (leader && victim == leader); })
+                .Where(c => Vector3.Distance(player.transform.position, c.transform.position) <= 8)
+                .OrderBy(c => Vector3.SqrMagnitude(player.transform.position - c.transform.position)).FirstOrDefault();
+            if (threat) { Fight(player, threat, leader, true); return; }
         }
+        if (ActionStatus != "running") return;
         string id = decision.target_id;
         switch (decision.action)
         {
             case "wait": return;
-            case "move": MoveTo(player, moveTarget, .7f); return;
+            case "move": case "jump":
+                MoveTo(player, moveTarget, .8f, decision.run);
+                if (decision.action == "jump" && ActionStatus == "running" && Time.time >= nextJump && player.IsOnGround() && player.GetStamina() > 20)
+                { Input = Input.With(jump: true, run: Input.Run); nextJump = Time.time + 1.5f; }
+                return;
             case "follow":
-                if (leader == null || !leader || leader.IsDead() || Observation.Id(leader) != id) { Stop(player, "Лидер не виден"); return; }
-                MoveTo(player, leader.transform.position, 3f);
+                if (leader == null || !leader || leader.IsDead() || Observation.Id(leader) != id) { Finish("Лидер не виден", false); return; }
+                MoveTo(player, leader.transform.position, 3, Vector3.Distance(player.transform.position, leader.transform.position) > 8);
+                if (ActionStatus == "success") ActionStatus = "running";
                 return;
             case "pickup":
-                if (!observation.Drops.TryGetValue(id, out var drop) || !drop || !drop.CanPickup()) { Stop(player, "Предмет уже недоступен"); return; }
-                if (Vector3.Distance(player.transform.position, drop.transform.position) <= 2f)
-                {
-                    // Normal pickup performs inventory/weight/network checks; never create items.
-                    bool picked = player.Pickup(drop.gameObject, false);
-                    Stop(player, picked ? "Предмет подобран" : "Игра отклонила подбор");
-                }
-                else MoveTo(player, drop.transform.position, 1.5f);
+                if (!observation.Drops.TryGetValue(id, out var drop) || !drop || !drop.CanPickup()) { Finish("Предмет больше не лежит на земле"); return; }
+                if (Vector3.Distance(player.transform.position, drop.transform.position) > 2) MoveTo(player, drop.transform.position, 1.5f);
+                else { bool picked = player.Pickup(drop.gameObject, false); Finish(picked ? "Предмет подобран" : "Игра отклонила подбор", picked); }
                 return;
-            case "eat":
-            case "equip":
-                if (!observation.Items.TryGetValue(id, out var item) || !player.GetInventory().GetAllItems().Contains(item))
-                { Stop(player, "Предмет отсутствует в инвентаре"); return; }
-                if ((decision.action == "eat" && item.m_shared.m_food > 0 && player.CanEat(item, false)) ||
-                    (decision.action == "equip" && item.IsEquipable() && !item.m_equipped))
+            case "interact":
+                if (!observation.Interactables.TryGetValue(id, out var target) || !target) { Finish("Объект недоступен", false); return; }
+                if (Vector3.Distance(player.transform.position, target.transform.position) > 2) MoveTo(player, target.transform.position, 1.5f);
+                else
                 {
-                    // UseItem is the same path as a player using inventory: consumption and
-                    // equipment timing are handled by the game, including food removal.
-                    player.UseItem(player.GetInventory(), item, false);
-                    Stop(player, "Предмет передан штатному обработчику игры");
+                    bool ok = target is Interactable interactable && interactable.Interact(player, false, false);
+                    Finish(ok ? "Объект использован" : "Игра отклонила взаимодействие", ok);
                 }
-                else Stop(player, "Игра не разрешает использовать этот предмет");
                 return;
-            case "attack":
-                if (!allowCombat || !observation.Characters.TryGetValue(id, out var enemy) ||
-                    !Observation.IsEnemy(player, enemy, leader)) { Stop(player, "Цель боя недоступна"); return; }
-                var weapon = player.GetCurrentWeapon();
-                if (weapon != null && (weapon.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Bow ||
-                    weapon.m_shared.m_animationState == ItemDrop.ItemData.AnimationState.Crossbow ||
-                    weapon.m_shared.m_animationState == ItemDrop.ItemData.AnimationState.Staves ||
-                    weapon.m_shared.m_animationState == ItemDrop.ItemData.AnimationState.MagicItem))
-                { Stop(player, "Дальний бой пока не поддерживается"); return; }
-                if (player.GetHealth() < player.GetMaxHealth() * .3f || player.GetStamina() < 15)
-                { Stop(player, "Недостаточно здоровья или выносливости для боя"); return; }
-                var direction = enemy.transform.position - player.transform.position;
-                if (direction.magnitude > 20) { Stop(player, "Враг слишком далеко"); return; }
-                if (direction.magnitude <= 2.2f)
+            case "eat": case "equip": case "use": UseInventory(player, id); return;
+            case "attack": case "defend": case "flee": case "dodge":
+                if (!observation.Characters.TryGetValue(id, out var enemy) || !Observation.IsEnemy(player, enemy, leader))
+                { Finish("Враг побеждён или больше не виден"); return; }
+                if (decision.action == "attack" && !allowCombat) { Finish("Бой выключен в настройках помощника", false); return; }
+                if (decision.action == "flee") Retreat(player, enemy, leader);
+                else if (decision.action == "defend" || decision.action == "dodge")
                 {
-                    direction.y = 0;
-                    player.SetLookDir(direction.normalized);
-                    bool attack = Time.time >= nextAttack && !player.InAttack();
-                    Controls(player, Vector3.zero, attack);
-                    player.SetLookDir(direction.normalized);
-                    if (attack) nextAttack = Time.time + 1;
+                    var away = player.transform.position - enemy.transform.position; away.y = 0;
+                    bool evade = decision.action == "dodge" && Time.time >= nextJump && player.GetStamina() > 20;
+                    Controls(evade ? away.normalized : Vector3.zero, -away, block: true, jump: evade, dodge: evade);
+                    if (evade) { nextJump = Time.time + 2; Finish("Уклонение передано игре"); Controls(away.normalized, -away, block: true, jump: true, dodge: true); }
                 }
-                else MoveTo(player, enemy.transform.position, 2f);
+                else Fight(player, enemy, leader, false);
                 return;
-            default: Stop(player, "Неизвестное действие"); return;
+            default: Finish("Неизвестное действие", false); return;
         }
     }
 
-    private void MoveTo(Player player, Vector3 target, float stopDistance)
+    private void UseInventory(Player player, string id)
+    {
+        if (usedItem != null)
+        {
+            bool done = decision!.action == "equip" ? usedItem.m_equipped : usedItem.m_stack < oldStack || !player.GetInventory().ContainsItem(usedItem);
+            if (done) Finish("Игра подтвердила использование предмета");
+            else if (Time.time - usedAt > 8) Finish("Игра не подтвердила использование предмета", false);
+            return;
+        }
+        if (!observation!.Items.TryGetValue(id, out var item) || !player.GetInventory().ContainsItem(item)) { Finish("Предмет отсутствует", false); return; }
+        if (decision!.action == "equip" && item.m_equipped) { Finish("Предмет уже экипирован"); return; }
+        bool valid = decision.action == "equip" ? item.IsEquipable() : decision.action == "eat" ? item.m_shared.m_food > 0 && player.CanEat(item, false) : item.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Consumable;
+        if (!valid) { Finish("Игра не разрешает использовать этот предмет", false); return; }
+        usedItem = item; oldStack = item.m_stack; usedAt = Time.time;
+        player.UseItem(player.GetInventory(), item, false);
+    }
+
+    private void PrepareSurvival(Player player)
+    {
+        if (Time.time < nextSurvival || player.InAttack() || player.IsSwimming()) return;
+        nextSurvival = Time.time + 3;
+        var food = player.GetInventory().GetAllItems().Where(i => i.m_stack > 0 && i.m_shared.m_food > 0 && player.CanEat(i, false))
+            .OrderByDescending(i => i.m_shared.m_food + i.m_shared.m_foodStamina).FirstOrDefault();
+        if (food != null) { player.UseItem(player.GetInventory(), food, false); Result = "Выживание: использую доступную еду"; }
+    }
+
+    private void Fight(Player player, Character enemy, Player? leader, bool reflex)
+    {
+        var direction = enemy.transform.position - player.transform.position;
+        float distance = direction.magnitude;
+        if (distance > 20) { if (!reflex) Finish("Враг слишком далеко", false); return; }
+        if (player.GetHealth() < player.GetMaxHealth() * .3f) { Retreat(player, enemy, leader); return; }
+        if (player.GetStamina() < 12)
+        { Controls(distance < 3 ? -new Vector3(direction.x, 0, direction.z).normalized * .4f : Vector3.zero, direction, block: true); Result = "Восстанавливаю выносливость, держу защиту"; return; }
+        var weapon = player.GetCurrentWeapon();
+        if (weapon != null && weapon.m_shared.m_useDurability && weapon.m_durability <= 0)
+        { Result = "Оружие сломано; отступаю"; Retreat(player, enemy, leader); return; }
+        bool bow = weapon?.m_shared.m_attack.m_bowDraw == true;
+        bool ranged = bow || weapon?.m_shared.m_animationState == ItemDrop.ItemData.AnimationState.Crossbow ||
+                      weapon?.m_shared.m_animationState == ItemDrop.ItemData.AnimationState.Staves || weapon?.m_shared.m_animationState == ItemDrop.ItemData.AnimationState.MagicItem;
+        var aim = enemy.GetCenterPoint() - player.GetEyePoint();
+        float range = ranged ? 15 : Mathf.Clamp((weapon?.m_shared.m_attack.m_attackRange ?? 1.5f) + enemy.GetRadius(), 1.7f, 4);
+        if (distance > range) { MoveTo(player, enemy.transform.position, range - .2f); return; }
+        if (ranged && Physics.Raycast(player.GetEyePoint(), aim.normalized, out var hit, aim.magnitude, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore) &&
+            hit.collider.GetComponentInParent<Character>() != enemy)
+        { bowStarted = 0; MoveTo(player, enemy.transform.position, 2); Result = "Линия огня закрыта; меняю позицию"; return; }
+        if (enemy.InAttack() && distance < 3 && !bow)
+        { Controls(Vector3.zero, aim, block: true); Result = "Защищаюсь от удара"; return; }
+        bool attack = Time.time >= nextAttack && !player.InAttack();
+        bool hold = false;
+        if (bow)
+        {
+            if (bowStarted <= 0) bowStarted = Time.time;
+            hold = Time.time - bowStarted < 1.8f; attack = false;
+            if (!hold && Time.time - bowStarted > 2.2f) bowStarted = 0;
+        }
+        Controls(Vector3.zero, aim, attack, hold);
+        if (attack) nextAttack = Time.time + .65f;
+        Result = reflex ? "Защищаю себя и лидера: " + enemy.GetHoverName() : "Атакую: " + enemy.GetHoverName();
+    }
+
+    private void Retreat(Player player, Character enemy, Player? leader)
+    {
+        var away = player.transform.position - enemy.transform.position; away.y = 0;
+        var target = player.transform.position + away.normalized * 6;
+        if (leader != null && leader && Vector3.Distance(leader.transform.position, enemy.transform.position) > 5) target = leader.transform.position;
+        MoveTo(player, target, 1, true);
+        var i = Input;
+        Controls(new Vector3(i.X, 0, i.Z) * i.Magnitude, -away, block: !i.Run, run: i.Run);
+        Result = "Отступаю: мало здоровья";
+    }
+
+    private void MoveTo(Player player, Vector3 target, float stopDistance, bool run = false)
     {
         var origin = player.transform.position;
         float distance = Vector3.Distance(origin, target);
-        if (distance <= stopDistance) return;
-        if (distance > 60 || !Pathfinding.instance) { Stop(player, "Нет доступного маршрута"); return; }
+        if (distance <= stopDistance) { lastProgress = Time.time; lastPosition = origin; Finish("Точка достигнута"); return; }
+        if (player.IsEncumbered()) { Finish("Перегрузка инвентаря", false); return; }
+        if (distance > 60 || !Pathfinding.instance) { Finish("Нет доступного маршрута", false); return; }
         if (Time.time >= nextPath)
         {
-            path.Clear();
-            nextPath = Time.time + 1;
+            path.Clear(); nextPath = Time.time + .75f;
             if (!Pathfinding.instance.GetPath(origin, target, path, Pathfinding.AgentType.HumanoidNoSwim, true))
-            { Stop(player, "Игра не нашла пеший маршрут; помогите вручную"); return; }
+            { Finish("Игра не нашла пеший маршрут", false); return; }
         }
-        while (path.Count > 0 && Vector3.Distance(origin, path[0]) < .7f) path.RemoveAt(0);
+        while (path.Count > 0 && Vector3.Distance(origin, path[0]) < .6f) path.RemoveAt(0);
         if (path.Count == 0) return;
-        if (Mathf.Abs(path[0].y - origin.y) > 1.2f) { Stop(player, "Маршрут требует прыжка; помогите вручную"); return; }
-        if (Vector3.Distance(origin, lastPosition) > .3f) { lastPosition = origin; lastProgress = Time.time; }
-        if (Time.time - lastProgress > 2.5f) { Stop(player, "Персонаж застрял; помогите вручную"); return; }
-        var direction = path[0] - origin;
-        direction.y = 0;
-        Controls(player, direction.normalized, false);
+        if (Mathf.Abs(path[0].y - origin.y) > 1.8f) { Finish("Маршрут требует обхода перепада высоты", false); return; }
+        if (Vector3.Distance(origin, lastPosition) > .25f) { lastPosition = origin; lastProgress = Time.time; }
+        bool jump = Time.time - lastProgress > 1.2f && Time.time >= nextJump && player.IsOnGround() && player.GetStamina() > 25;
+        if (jump) nextJump = Time.time + 2;
+        if (Time.time - lastProgress > 4) { Finish("Застрял: маршрут заблокирован", false); return; }
+        var direction = path[0] - origin; direction.y = 0;
+        Controls(direction.normalized, jump: jump, run: run && player.GetStamina() > 30 && !player.IsSwimming());
     }
 }

@@ -20,6 +20,7 @@ from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFoun
                         API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .diagnostics import validation_diagnostics
 from . import __version__
+from .planning import Planner
 
 
 class ProviderSettings(StrictModel):
@@ -65,9 +66,15 @@ class State:
         self.snapshot_error: dict | None = None
         self.provider_error: dict | None = None
         self.events: deque[dict] = deque(maxlen=50)
+        self.event_id = 0
+        self.instance_id = secrets.token_hex(8)
+        self.planner = Planner(self)
 
     def event(self, source: str, message: str):
-        self.events.appendleft({"time": time.strftime("%H:%M:%S"), "source": source, "message": message})
+        if self.events and self.events[0]["source"] == source and self.events[0]["message"] == message:
+            return
+        self.event_id += 1
+        self.events.appendleft({"id": self.event_id, "time": time.strftime("%H:%M:%S"), "source": source, "message": message[:1800]})
 
 
 def load_token(data_dir: Path) -> str:
@@ -98,6 +105,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await state.planner.close()
         if owned_client:
             await client.aclose()
 
@@ -185,6 +193,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "snapshot_error": state.snapshot_error,
             "provider_error": state.provider_error,
             "events": list(state.events),
+            "instance_id": state.instance_id,
+            "planning": state.planner.task is not None,
         }
 
     @app.post("/api/models/{provider}", dependencies=[Depends(authenticate)])
@@ -247,6 +257,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.provider = settings.provider
         state.model = settings.model
         state.revision += 1
+        state.planner.reset()
         # Changing providers never implicitly starts control.
         state.command = Command(mode="stop", objective=state.command.objective)
         state.event("bridge", "Провайдер изменён; управление остановлено")
@@ -261,6 +272,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise HTTPException(409, "Сначала выберите провайдера и добавьте API-ключ")
         state.command = value
         state.revision += 1
+        state.planner.reset()
+        state.next_ai_request = 0
         state.event("operator", {"stop": "Стоп", "follow": "Следовать за лидером", "ai": value.objective}[value.mode])
         return {"ok": True, "revision": state.revision}
 
@@ -274,6 +287,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             state.session_id = snapshot.session_id
             state.last_sequence = 0
             state.revision += 1
+            state.planner.reset()
             # A reconnected/new character always starts stopped.
             state.command = Command(mode="stop", objective=state.command.objective)
         if snapshot.sequence <= state.last_sequence:
@@ -289,6 +303,11 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         api_attempted = False
         api_error = None
         result = wait()
+        if mode == "ai" and snapshot.background_planning:
+            result, source, plan_id = state.planner.decision(snapshot)
+            result = validate_decision(result, snapshot)
+            return DecisionReply(**result.model_dump(), sequence=snapshot.sequence, source=source,
+                                 command_revision=state.revision, plan_id=plan_id, mode=state.command.mode)
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
         elif mode == "follow":
@@ -338,6 +357,6 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         result = validate_decision(result, snapshot)
         state.event(source, result.say or result.action.value)
         return DecisionReply(**result.model_dump(), sequence=snapshot.sequence,
-                             source=source, command_revision=state.revision)
+                             source=source, command_revision=state.revision, mode=state.command.mode)
 
     return app

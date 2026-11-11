@@ -57,5 +57,12 @@ if (args.Length > 0 && args[0] == "--check-response")
     if (!DecisionPolicy.Accept(decision, snapshot, false)) return 1;
     Console.WriteLine("ACCEPTED:" + decision.action);
 }
+else if (args.Length > 0 && args[0] == "--check-plan-response")
+{
+    var decision = WireJson.Deserialize<Decision>(Console.In.ReadToEnd());
+    if (!DecisionPolicy.Accept(decision, snapshot, false) || string.IsNullOrEmpty(decision.plan_id) ||
+        decision.destination == null || !decision.run) return 1;
+    Console.WriteLine("PLAN_ACCEPTED:" + decision.action);
+}
 else Console.WriteLine(WireJson.Serialize(snapshot));
 return 0;

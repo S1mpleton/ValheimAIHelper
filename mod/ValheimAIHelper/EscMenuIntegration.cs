@@ -44,7 +44,11 @@ internal sealed class EscMenuIntegration : IDisposable
                 if (!c) continue;
                 if (c.GetType().Name == "Localize" && c is Behaviour behaviour) behaviour.enabled = false;
                 if (c.GetType().Name is "TextMeshProUGUI" or "Text")
-                    c.GetType().GetProperty("text")?.SetValue(c, "AI-ПОМОЩНИК", null);
+                {
+                    c.GetType().GetProperty("text")?.SetValue(c, "УПРАВЛЕНИЕ ПЕРСОНАЖЕМ", null);
+                    c.GetType().GetProperty("enableAutoSizing")?.SetValue(c, true, null);
+                    c.GetType().GetProperty("fontSizeMin")?.SetValue(c, 18f, null);
+                }
             }
             AccessTools.Field(typeof(Menu), "m_rebuildLayout")?.SetValue(menu, true);
         }

@@ -27,6 +27,11 @@ async def main():
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
                 "action": "wait", "target_id": "", "duration": 1, "say": "Связь работает"
             })}}]})
+        if b'"steps"' in request.content:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"steps": [{
+                "action": "move", "target_id": "", "duration": 2, "say": "Иду к точке",
+                "destination": {"x": -1080, "y": 32.125, "z": 4800}, "run": True,
+            }]})}}]})
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
             "action": "move", "target_id": "", "duration": 2, "say": "Иду вперёд"
         })}}]})
@@ -54,6 +59,16 @@ async def main():
             assert configured.status_code == 200, configured.text
             result = subprocess.check_output(["dotnet", str(program), "--read-ui-ok"], input=configured.content, timeout=10)
             assert result.strip() == b"UI_OK"
+            await client.post("/api/command", json={"mode": "ai", "objective": "Иди к точке"})
+            planning = await client.post("/api/decision", json={**original, "sequence": 4, "background_planning": True})
+            assert planning.status_code == 200
+            task = app.state.bridge.planner.task
+            if task is not None: await task
+            planned = await client.post("/api/decision", json={**original, "sequence": 5, "background_planning": True})
+            assert planned.status_code == 200 and planned.json()["action"] == "move", planned.text
+            result = subprocess.check_output(["dotnet", str(program), "--check-plan-response", "5"], input=planned.content, timeout=10)
+            assert result.strip() == b"PLAN_ACCEPTED:move"
+            await app.state.bridge.planner.close()
             status = await client.get("/api/status")
             result = subprocess.check_output(["dotnet", str(program), "--read-ui-status"], input=status.content, timeout=10)
             assert result.strip() == b"UI_STATUS_OK"
@@ -72,6 +87,7 @@ async def main():
             assert result.strip() == b"UI_OK"
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
+    print("PASS: background plan -> destination/run/plan ID -> C# policy")
 
 
 if __name__ == "__main__":

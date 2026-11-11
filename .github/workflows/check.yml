@@ -6,17 +6,18 @@ jobs:
   check:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6.1.0
         with:
           global-json-file: global.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
       - run: python -m pip install --require-hashes -r bridge/requirements-dev.txt
@@ -39,8 +40,47 @@ jobs:
       - run: dotnet test mod/ValheimAIHelper.Tests/ValheimAIHelper.Tests.csproj -c Release -p:RestoreLockedMode=true
       - run: dotnet build mod/ValheimAIHelper/ValheimAIHelper.csproj -c Release -p:RestoreLockedMode=true
       - run: python scripts/check_wire.py
-      - run: python scripts/package.py
-      - uses: actions/upload-artifact@v4
+      - name: Install locked service build tools
+        if: runner.os == 'Windows'
+        run: python -m pip install --require-hashes -r bridge/requirements-build.txt
+      - name: Freeze bundled Windows service
+        if: runner.os == 'Windows'
+        run: python scripts/freeze_bridge.py
+      - name: Test service without Python or source directory
+        if: runner.os == 'Windows'
+        run: python scripts/smoke_frozen.py .local/frozen/ValheimAIBridge/ValheimAIBridge.exe
+      - name: Build ready-to-copy Windows archive
+        if: runner.os == 'Windows'
+        run: python scripts/package.py --runtime .local/frozen/ValheimAIBridge
+      - uses: actions/upload-artifact@v7.0.2
+        if: runner.os == 'Windows'
         with:
-          name: ValheimAIHelper-${{ matrix.os }}
-          path: dist/*
+          name: ValheimAIHelper-windows
+          path: dist/windows/*
+          if-no-files-found: error
+  release:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: ValheimAIHelper-windows
+          path: release-assets
+      - name: Publish verified sources and Windows bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          version=$(python -c "import xml.etree.ElementTree as E; print(E.parse('mod/ValheimAIHelper/ValheimAIHelper.csproj').findtext('PropertyGroup/Version'))")
+          tag="v$version"
+          cd release-assets
+          sha256sum --check "ValheimAIHelper-windows-$version.zip.sha256"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; preserving published assets."
+            exit 0
+          fi
+          gh release create "$tag" "ValheimAIHelper-windows-$version.zip" "ValheimAIHelper-windows-$version.zip.sha256" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Valheim AI Helper $version" --notes-file ../docs/release-0.3.0.md
