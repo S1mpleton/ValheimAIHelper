@@ -6,7 +6,7 @@ using UnityEngine;
 namespace ValheimAIHelper;
 
 // Native input/UseItem/Interact only. No position, vitals, ownership or inventory writes.
-internal sealed class ActionExecutor
+internal sealed partial class ActionExecutor
 {
     private Decision? decision;
     private Observation? observation;
@@ -26,7 +26,8 @@ internal sealed class ActionExecutor
         bool same = decision != null && (value.plan_id ?? "") == PlanId && decision.action == value.action && decision.target_id == value.target_id && decision.source == value.source && decision.mode == value.mode;
         observation = from;
         expires = Time.realtimeSinceStartup + value.duration;
-        if (same) return; // Preserve paths, draw time and completed one-shot steps on lease renewal.
+        if (same) { decision = value; return; } // Renew policy/flags while preserving execution state.
+        ResetExtended(value);
         decision = value;
         PlanId = value.plan_id ?? "";
         ActionStatus = "running";
@@ -42,6 +43,7 @@ internal sealed class ActionExecutor
     public void Stop(Player? player, string reason)
     {
         decision = null; observation = null; PlanId = ""; ActionStatus = "";
+        inventorySession.Close(); placementPulse = false;
         path.Clear(); bowStarted = 0; usedItem = null;
         Result = reason; Input = default;
     }
@@ -59,8 +61,8 @@ internal sealed class ActionExecutor
     }
 
     private void Controls(Vector3 movement, Vector3 aim = default, bool attack = false, bool hold = false,
-        bool block = false, bool jump = false, bool run = false, bool dodge = false)
-    { Input = ControlIntent.Create(movement.x, movement.y, movement.z, attack).With(aim.x, aim.y, aim.z, hold, block, jump, run, dodge); }
+        bool block = false, bool jump = false, bool run = false, bool dodge = false, bool secondary = false, bool crouch = false)
+    { Input = ControlIntent.Create(movement.x, movement.y, movement.z, attack).With(aim.x, aim.y, aim.z, hold, block, jump, run, dodge, secondary, crouch); }
 
     public void Tick(Player player, Player? leader, bool allowCombat, bool survival)
     {
@@ -68,19 +70,42 @@ internal sealed class ActionExecutor
         if (decision == null || observation == null) return;
         if (Time.realtimeSinceStartup >= expires) { Finish("Нет свежих данных от службы; управление приостановлено", false); return; }
         if (!player.IsOwner() || player != Player.m_localPlayer || player.IsDead() || player.IsTeleporting() ||
-            player.IsAttached() || player.IsSleeping() || player.InPlaceMode())
+            (player.IsAttached() && decision.action != "stand" && decision.action != "sleep") ||
+            (player.IsSleeping() && decision.action != "sleep"))
         { Finish("Действие недоступно в текущем состоянии", false); return; }
         if (decision.mode == "stop" || (string.IsNullOrEmpty(decision.mode) && decision.action == "wait" && decision.source == "local")) return;
-        if (survival && decision.action != "eat" && decision.action != "use") PrepareSurvival(player);
-        if (allowCombat && (decision.action == "follow" || decision.action == "wait" || decision.action == "move" || decision.action == "pickup" || decision.action == "interact"))
+        if (decision.avoid_combat)
+        {
+            allowCombat = false;
+            var danger = Character.GetAllCharacters().Where(c => Observation.IsEnemy(player, c, leader) && c.GetBaseAI()?.GetTargetCreature() == player &&
+                Vector3.Distance(c.transform.position, player.transform.position) < 5).FirstOrDefault();
+            if (danger) { inventorySession.Close(); Retreat(player, danger, leader); return; }
+        }
+        if (survival && !new[] { "eat", "use", "drop", "deposit", "use_on", "craft", "upgrade" }.Contains(decision.action)) PrepareSurvival(player);
+        if (allowCombat && new[] { "follow", "wait", "move", "pickup", "interact", "gather", "rest", "open", "take", "deposit", "craft", "repair", "build", "repair_building" }.Contains(decision.action))
         {
             var threat = Character.GetAllCharacters().Where(c => Observation.IsEnemy(player, c, leader))
                 .Where(c => { var victim = c.GetBaseAI()?.GetTargetCreature(); return victim == player || (leader && victim == leader); })
                 .Where(c => Vector3.Distance(player.transform.position, c.transform.position) <= 8)
                 .OrderBy(c => Vector3.SqrMagnitude(player.transform.position - c.transform.position)).FirstOrDefault();
-            if (threat) { Fight(player, threat, leader, true); return; }
+            if (threat)
+            {
+                if (OwnsInventory) { inventorySession.Close(); Finish("Работа прервана: защищаюсь от врага", false); }
+                if (player.InPlaceMode())
+                {
+                    Finish("Строительство прервано опасностью", false);
+                    var combatWeapon = player.GetInventory().GetAllItems().Where(i => i.m_stack > 0 && i.m_shared.m_buildPieces == null &&
+                        i.GetDamage().GetTotalDamage() > 0 && i.IsEquipable() && (!i.m_shared.m_useDurability || i.m_durability > 0))
+                        .OrderByDescending(i => i.GetDamage().GetTotalDamage()).FirstOrDefault();
+                    if (Time.time >= nextSurvival)
+                    { if (combatWeapon != null) player.UseItem(player.GetInventory(), combatWeapon, true); else player.HideHandItems(); nextSurvival = Time.time + 2; }
+                    return;
+                }
+                Fight(player, threat, leader, true); return;
+            }
         }
         if (ActionStatus != "running") return;
+        if (ExtendedTick(player, leader, allowCombat)) return;
         string id = decision.target_id;
         switch (decision.action)
         {
@@ -142,7 +167,7 @@ internal sealed class ActionExecutor
         bool valid = decision.action == "equip" ? item.IsEquipable() : decision.action == "eat" ? item.m_shared.m_food > 0 && player.CanEat(item, false) : item.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Consumable;
         if (!valid) { Finish("Игра не разрешает использовать этот предмет", false); return; }
         usedItem = item; oldStack = item.m_stack; usedAt = Time.time;
-        player.UseItem(player.GetInventory(), item, false);
+        player.UseItem(player.GetInventory(), item, true);
     }
 
     private void PrepareSurvival(Player player)
@@ -151,7 +176,7 @@ internal sealed class ActionExecutor
         nextSurvival = Time.time + 3;
         var food = player.GetInventory().GetAllItems().Where(i => i.m_stack > 0 && i.m_shared.m_food > 0 && player.CanEat(i, false))
             .OrderByDescending(i => i.m_shared.m_food + i.m_shared.m_foodStamina).FirstOrDefault();
-        if (food != null) { player.UseItem(player.GetInventory(), food, false); Result = "Выживание: использую доступную еду"; }
+        if (food != null) { player.UseItem(player.GetInventory(), food, true); Result = "Выживание: использую доступную еду"; }
     }
 
     private void Fight(Player player, Character enemy, Player? leader, bool reflex)

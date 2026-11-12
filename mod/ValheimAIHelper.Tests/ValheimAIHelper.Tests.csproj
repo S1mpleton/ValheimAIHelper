@@ -20,5 +20,7 @@
     <Compile Include="../ValheimAIHelper/BridgeUiProtocol.cs" Link="BridgeUiProtocol.cs" />
     <Compile Include="../ValheimAIHelper/LogJournal.cs" Link="LogJournal.cs" />
     <Compile Include="../ValheimAIHelper/LeaderCommand.cs" Link="LeaderCommand.cs" />
+    <Compile Include="../ValheimAIHelper/UiSelection.cs" Link="UiSelection.cs" />
+    <Compile Include="../ValheimAIHelper/Capabilities.cs" Link="Capabilities.cs" />
   </ItemGroup>
 </Project>

@@ -38,7 +38,8 @@ def main():
                          "4. Start Valheim, enter a world, press Esc -> Character control (F8).\r\n"
                          "The local AI service starts and stops with the game. No Python/PowerShell needed.\r\n"
                          "Set your provider/key/model in the game. Keys remain in memory.\r\n"
-                         "Leader chat: !ai follow, !ai stop, !ai status, !ai <objective>. F9: emergency stop.\r\n")
+                         "Leader chat: address the character by name, e.g. Bjorn, pick up stones.\r\n"
+                         "Ordinary follow-up messages are interpreted from context. F9: emergency stop.\r\n")
     checksum = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".zip.sha256").write_text(f"{checksum}  {output.name}\n", encoding="ascii")
     print(output)

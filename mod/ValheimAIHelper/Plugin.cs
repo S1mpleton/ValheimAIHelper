@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.3.1")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.4.0")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -20,7 +20,7 @@ public sealed partial class Plugin : BaseUnityPlugin
     private readonly ActionExecutor executor = new();
     private static Plugin? instance;
     private Harmony? harmony;
-    private bool inputPatchReady, panelFocusReady;
+    private bool inputPatchReady, panelFocusReady, placementPatchReady;
     private Player? actor;
     private PlayerController? controller;
     private bool active, showPanel, bridgeSessionReady;
@@ -43,7 +43,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         leaderName = Config.Bind("Player", "LeaderName", "", "Exact leader character name. Empty: lock on nearest other player when AI is enabled.");
         allowCombat = Config.Bind("Player", "AllowCombat", true, "Allow combat and immediate defence against hostile monsters. Visible in the game panel.");
         autoSurvival = Config.Bind("Player", "AutoSurvival", true, "Use available food through native inventory actions.");
-        allowChat = Config.Bind("Player", "LeaderChat", true, "Accept !ai commands from the selected leader only.");
+        allowChat = Config.Bind("Player", "LeaderChat", true, "Accept ordinary chat from the selected leader; character name explicitly addresses the helper. Chat context is sent to the configured AI.");
         autoBridge = Config.Bind("Bridge", "AutoStart", true, "Automatically start the bundled local service on Windows.");
         interval = Config.Bind("Bridge", "DecisionInterval", 1f, new ConfigDescription("Seconds between game observations; AI request cost is controlled separately by AI.RequestInterval.", new AcceptableValueRange<float>(.5f, 2f)));
         instance = this;
@@ -62,6 +62,12 @@ public sealed partial class Plugin : BaseUnityPlugin
         catch (Exception ex) { Logger.LogWarning("Esc menu entry: " + ex.GetType().Name + ". Use F8."); }
         try { harmony.PatchAll(typeof(LeaderChatPatch)); }
         catch (Exception ex) { AddLog("chat", "Приём чата несовместим с игрой: " + ex.GetType().Name); }
+        try
+        {
+            harmony.PatchAll(typeof(PlacementInputPatch)); harmony.PatchAll(typeof(PlacementButtonsPatch)); harmony.PatchAll(typeof(PlacementResultPatch)); harmony.PatchAll(typeof(StructureRepairResultPatch));
+            placementPatchReady = true;
+        }
+        catch (Exception ex) { AddLog("placement", ex.ToString()); }
         Logger.LogInfo("Valheim version: " + global::Version.GetVersionString() + "; build references: 0.221.4");
         Logger.LogInfo("AI Helper loaded. Control is OFF. F8 panel; F9 emergency release.");
     }
@@ -83,7 +89,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         if (!active || actor == null || !actor) return;
         if (actor != Player.m_localPlayer || !actor.IsOwner())
         { DisableControl("Сетевая принадлежность персонажа изменилась. AI отключён."); return; }
-        if (showPanel || InventoryGui.IsVisible() || Menu.IsVisible() || global::Console.IsVisible() ||
+        if (showPanel || (InventoryGui.IsVisible() && !executor.OwnsInventory) || Menu.IsVisible() || global::Console.IsVisible() ||
             (Chat.instance != null && Chat.instance.HasFocus()))
         { executor.Pause(); return; }
         try { executor.Tick(actor, FindLeader(), allowCombat.Value, autoSurvival.Value); }
@@ -148,6 +154,24 @@ public sealed partial class Plugin : BaseUnityPlugin
         return true;
     }
 
+    internal static bool PlacementControl(Player player, out bool pulse)
+    {
+        var p = instance; pulse = false;
+        if (p == null || !p.placementPatchReady || !p.active || p.actor != player || !player.IsOwner() || player.IsDead() ||
+            p.showPanel || Menu.IsVisible() || (Chat.instance && Chat.instance.HasFocus()) || InventoryGui.IsVisible() || !player.InPlaceMode()) return false;
+        pulse = p.executor.PlacementInput;
+        return true;
+    }
+    internal static void PlacementInputEnded(Player player) { if (instance?.actor == player) instance.executor.EndPlacementInput(); }
+    internal static void PlacementCompleted(Player player, bool success) { if (instance?.actor == player) instance.executor.PlacementResult(success, player); }
+    internal static void StructureRepairAttempted(Player player, float health) { if (instance?.actor == player) instance.executor.RepairAttempt(health); }
+    internal static bool SayFromAction(string text)
+    {
+        if (instance == null || !Chat.instance || string.IsNullOrWhiteSpace(text)) return false;
+        instance.ChatReply(text);
+        return true;
+    }
+
     private Player? FindLeader()
     {
         var local = actor ? actor : Player.m_localPlayer;
@@ -166,7 +190,7 @@ public sealed partial class Plugin : BaseUnityPlugin
     {
         while (active && actor != null && actor)
         {
-            if (bridgeSessionReady && (showPanel || Menu.IsVisible() || InventoryGui.IsVisible() || global::Console.IsVisible() ||
+            if (bridgeSessionReady && (showPanel || Menu.IsVisible() || (InventoryGui.IsVisible() && !executor.OwnsInventory) || global::Console.IsVisible() ||
                 (Chat.instance != null && Chat.instance.HasFocus())))
             {
                 executor.Pause();
@@ -178,13 +202,14 @@ public sealed partial class Plugin : BaseUnityPlugin
             string payload = "";
             try
             {
+                executor.RefreshOutcomes(actor);
                 observation = Observation.Capture(actor, FindLeader(), session, ++sequence, previousResult);
+                observation.Data.previous_result = ObservationValues.Text(executor.Result, 240);
                 observation.Data.background_planning = true;
+                observation.Data.listen_chat = allowChat.Value;
                 observation.Data.plan_id = executor.PlanId;
                 observation.Data.action_status = executor.ActionStatus;
-                observation.Data.supported_actions = allowCombat.Value
-                    ? new[] { "wait", "follow", "move", "jump", "attack", "defend", "flee", "dodge", "pickup", "interact", "eat", "equip", "use" }
-                    : new[] { "wait", "follow", "move", "jump", "defend", "flee", "dodge", "pickup", "interact", "eat", "equip", "use" };
+                observation.Data.supported_actions = Capabilities.Supported(allowCombat.Value, placementPatchReady);
                 payload = WireJson.Serialize(observation.Data);
             }
             catch (Exception ex) { observation = null; status = "Ошибка наблюдения: " + ex.GetType().Name; executor.Stop(actor, status); AddLog("observation", status); }

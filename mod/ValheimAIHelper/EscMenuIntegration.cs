@@ -14,36 +14,49 @@ internal sealed class EscMenuIntegration : IDisposable
     private Component? button;
     private Menu? owner;
     private readonly Action open;
+    private readonly Dictionary<RectTransform, Vector2> manualPositions = new();
 
     public EscMenuIntegration(Action open) { this.open = open; }
+    public bool Installed => buttonObject;
 
     public void Install(Menu menu)
     {
         // Reflect UI-only fields so changes to TMPro/UGUI assembly versions don't
         // introduce another runtime dependency into the mod.
-        var source = AccessTools.Field(typeof(Menu), "menuCurrentPlayersListButton")?.GetValue(menu) as Component;
+        var source = GameUi.MenuButton(menu);
         if (source == null || !source) return;
+        var entry = GameUi.EntryRoot(menu, source);
         if (owner != menu || !buttonObject)
         {
             Dispose();
             owner = menu;
-            buttonObject = UnityEngine.Object.Instantiate(source.gameObject, source.transform.parent, false);
+            buttonObject = UnityEngine.Object.Instantiate(entry.gameObject, entry.parent, false);
             buttonObject.name = "ValheimAIHelperButton";
-            buttonObject.transform.SetSiblingIndex(source.transform.GetSiblingIndex() + 1);
+            buttonObject.transform.SetSiblingIndex(entry.GetSiblingIndex() + 1);
             buttonObject.SetActive(true);
-            button = buttonObject.GetComponent(source.GetType());
+            button = buttonObject.GetComponentInChildren(AccessTools.TypeByName("UnityEngine.UI.Button"), true);
             if (button == null) { Dispose(); return; }
+            foreach (var behaviour in buttonObject.GetComponentsInChildren<Behaviour>(true))
+            {
+                string ns = behaviour.GetType().Namespace ?? "";
+                bool nativeGraphic = AccessTools.TypeByName("UnityEngine.UI.Graphic")?.IsInstanceOfType(behaviour) == true;
+                bool nativeButton = AccessTools.TypeByName("UnityEngine.UI.Button")?.IsInstanceOfType(behaviour) == true;
+                if (ns != "UnityEngine.UI" && ns != "TMPro" && !nativeGraphic && !nativeButton && !GameUi.IsText(behaviour) &&
+                    !new[] { "ButtonSfx", "ButtonImageColor", "ButtonTextColor" }.Contains(behaviour.GetType().Name)) behaviour.enabled = false;
+            }
             var clickProperty = button.GetType().GetProperty("onClick");
             // Replace the whole event, including prefab persistent callbacks.
             // RemoveAllListeners alone would leave the player-list callback behind.
             var click = Activator.CreateInstance(clickProperty!.PropertyType) as UnityEvent;
             click!.AddListener(() => open());
             clickProperty.SetValue(button, click, null);
+            foreach (var b in buttonObject.GetComponentsInChildren<Behaviour>(true))
+                if (b.GetType().Name is "Localize" or "UIGroupHandler" or "UIInputHint" or "UIInputHandler") b.enabled = false;
             foreach (var c in buttonObject.GetComponentsInChildren<Component>(true))
             {
                 if (!c) continue;
                 if (c.GetType().Name == "Localize" && c is Behaviour behaviour) behaviour.enabled = false;
-                if (c.GetType().Name is "TextMeshProUGUI" or "Text")
+                if (GameUi.IsText(c))
                 {
                     c.GetType().GetProperty("text")?.SetValue(c, "УПРАВЛЕНИЕ ПЕРСОНАЖЕМ", null);
                     c.GetType().GetProperty("enableAutoSizing")?.SetValue(c, true, null);
@@ -64,7 +77,28 @@ internal sealed class EscMenuIntegration : IDisposable
         }
         if (buttonObject == null || !buttonObject || button == null) return;
         buttonObject.SetActive(true);
+        LayoutWithoutGroup(entry);
         LinkNavigation(source, button);
+    }
+
+    private void LayoutWithoutGroup(Transform entry)
+    {
+        var parent = entry.parent;
+        var layoutType = AccessTools.TypeByName("UnityEngine.UI.LayoutGroup");
+        if (!parent || (layoutType != null && parent.GetComponent(layoutType))) return;
+        var sourceRect = entry as RectTransform;
+        var inserted = buttonObject!.transform as RectTransform;
+        if (sourceRect == null || inserted == null) return;
+        var buttonType = AccessTools.TypeByName("UnityEngine.UI.Button");
+        var siblings = parent.Cast<Transform>().Where(t => t != inserted && buttonType != null && t.GetComponentInChildren(buttonType, true))
+            .OfType<RectTransform>().ToArray();
+        foreach (var rect in siblings) if (!manualPositions.ContainsKey(rect)) manualPositions[rect] = rect.anchoredPosition;
+        var origin = manualPositions[sourceRect];
+        float spacing = siblings.Where(t => t != sourceRect).Select(t => Mathf.Abs(manualPositions[t].y - origin.y))
+            .Where(distance => distance > 20 && distance < 100).DefaultIfEmpty(50).Min();
+        inserted.anchoredPosition = origin + new Vector2(0, -spacing);
+        foreach (var rect in siblings)
+            rect.anchoredPosition = manualPositions[rect] + (rect.GetSiblingIndex() > inserted.GetSiblingIndex() ? new Vector2(0, -spacing) : Vector2.zero);
     }
 
     private static void LinkNavigation(Component source, Component inserted)
@@ -97,6 +131,7 @@ internal sealed class EscMenuIntegration : IDisposable
         buttonObject = null;
         button = null;
         owner = null;
+        manualPositions.Clear();
     }
 }
 

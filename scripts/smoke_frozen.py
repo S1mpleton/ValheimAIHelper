@@ -40,13 +40,17 @@ def main():
                     except OSError:
                         if time.monotonic() > deadline: raise
                         time.sleep(.2)
-                assert health["version"] == "0.3.1", health
+                assert health["version"] == "0.4.0", health
                 req = urllib.request.Request(base + "/api/status", headers={"Authorization": "Bearer " + token})
                 with opener.open(req) as r: status = json.load(r)
                 assert status["mode"] == "stop" and not status["keys_present"]["openai"]
+                chat = urllib.request.Request(base + "/api/chat", data=json.dumps({
+                    "actor_name":"Бъерн", "speaker":"Лидер", "text":"Привет"
+                }).encode(), headers={"Authorization":"Bearer " + token,"Content-Type":"application/json"})
+                with opener.open(chat) as r: assert not json.load(r)["handled"]
                 with opener.open(base + "/") as r: assert b"Valheim" in r.read()
                 with opener.open(base + "/app.js") as r: assert r.status == 200
-                print("PASS: frozen runtime starts without Python/source in cwd; HTTP/auth/static/status")
+                print("PASS: frozen runtime starts without Python/source in cwd; HTTP/auth/static/status/ordinary-chat")
             finally:
                 if child.poll() is None: child.terminate()
                 child.wait(timeout=10)

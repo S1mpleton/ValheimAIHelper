@@ -14,7 +14,7 @@ from pydantic import Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import httpx
 
-from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision
+from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision, Plan
 from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited,
                         decide, list_gemini_models, list_openai_models, diagnose_gemini,
                         API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
@@ -43,6 +43,13 @@ class Command(StrictModel):
     objective: str = Field(default="Следуй за лидером и помогай ему выжить.", max_length=1000)
 
 
+class ChatRequest(StrictModel):
+    actor_name: str = Field(min_length=1, max_length=120)
+    speaker: str = Field(max_length=120)
+    text: str = Field(min_length=1, max_length=1000)
+    explicit_address: bool = False
+
+
 class State:
     def __init__(self, token: str, client: httpx.AsyncClient):
         self.token = token
@@ -69,6 +76,20 @@ class State:
         self.event_id = 0
         self.instance_id = secrets.token_hex(8)
         self.planner = Planner(self)
+        self.chat_history: deque[dict] = deque(maxlen=12)
+        self.pending_chat: deque[dict] = deque(maxlen=6)
+        self.chat_id = 0
+        self.chat_busy = False
+        self.chat_listening = True
+        self.chat_suspended = False
+        self.chat_task: asyncio.Task | None = None
+
+    def cancel_chat(self):
+        if self.chat_task is not None:
+            self.chat_task.cancel()
+        self.chat_task = None
+        self.chat_busy = False
+        self.pending_chat.clear()
 
     def event(self, source: str, message: str):
         if self.events and self.events[0]["source"] == source and self.events[0]["message"] == message:
@@ -105,6 +126,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     @asynccontextmanager
     async def lifespan(app):
         yield
+        chat_task = state.chat_task
+        state.cancel_chat()
+        if chat_task is not None: await asyncio.gather(chat_task, return_exceptions=True)
         await state.planner.close()
         if owned_client:
             await client.aclose()
@@ -137,13 +161,13 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 length = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid length"}, status_code=400)
-            if length < 0 or length > 65536:
+            if length < 0 or length > 131072:
                 return JSONResponse({"detail": "Request too large"}, status_code=413)
             # Also cap chunked requests rather than trusting Content-Length alone.
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
-                if len(body) > 65536:
+                if len(body) > 131072:
                     return JSONResponse({"detail": "Request too large"}, status_code=413)
             request._body = bytes(body)
         response = await call_next(request)
@@ -242,6 +266,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise HTTPException(502, message) from None
         if state.provider == provider and state.model == settings.model and state.keys[provider] == key:
             state.provider_error = None
+            state.chat_suspended = False
         return {"ok": True, "model": settings.model, "checks": checks}
 
     @app.post("/api/provider", dependencies=[Depends(authenticate)])
@@ -254,9 +279,11 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.next_ai_request = 0.0
         state.request_interval_seconds = settings.request_interval_seconds
         state.provider_error = None
+        state.chat_suspended = False
         state.provider = settings.provider
         state.model = settings.model
         state.revision += 1
+        state.cancel_chat()
         state.planner.reset()
         # Changing providers never implicitly starts control.
         state.command = Command(mode="stop", objective=state.command.objective)
@@ -272,10 +299,69 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise HTTPException(409, "Сначала выберите провайдера и добавьте API-ключ")
         state.command = value
         state.revision += 1
+        state.cancel_chat()
         state.planner.reset()
         state.next_ai_request = 0
         state.event("operator", {"stop": "Стоп", "follow": "Следовать за лидером", "ai": value.objective}[value.mode])
         return {"ok": True, "revision": state.revision}
+
+    @app.post("/api/chat", dependencies=[Depends(authenticate)])
+    async def leader_chat(value: ChatRequest):
+        if not state.chat_listening:
+            return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
+        state.chat_id += 1
+        line = {"id": state.chat_id, "speaker": value.speaker, "text": value.text, "explicit_address": value.explicit_address}
+        state.chat_history.append(line)
+        state.event("leader-chat", value.speaker + ": " + value.text)
+        if state.command.mode == "ai":
+            state.pending_chat.append(line)
+            if value.explicit_address:
+                state.planner.interrupt_planning()
+                state.next_ai_request = 0
+            return {"handled": False, "queued": True, "mode": "ignore", "objective": "", "reply": ""}
+        if not state.keys.get(state.provider) or state.chat_busy or state.chat_suspended:
+            return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
+        # A listener may classify while native following/manual control continues.
+        # It returns an intention only; the mod's command epoch decides whether to
+        # enable control. A late classifier result cannot undo F9.
+        state.chat_busy = True
+        revision = state.revision
+        chat_task = None
+        probe = state.last_snapshot or Snapshot(session_id="chat-context", sequence=1, supported_actions=["wait"],
+            actor={"id":"chat-context","name":value.actor_name,"health":1,"max_health":1,"stamina":0,"position":{"x":0,"y":0,"z":0}})
+        try:
+            delay = max(state.next_ai_request, state.retry_after) - time.monotonic()
+            if delay > 20:
+                return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
+            async def classify():
+                if delay > 0: await asyncio.sleep(delay)
+                state.next_ai_request = time.monotonic() + state.request_interval_seconds
+                return await decide(state.client, state.provider, state.model, state.keys[state.provider],
+                    "Классифицируй обращение к помощнику по контексту. Текущий режим: " + state.command.mode +
+                    "; задача: " + state.command.objective + ". Не управляй персонажем: steps=[wait].", probe,
+                    planning=True, chat=tuple({**m,"pending":m["id"]==line["id"]} for m in state.chat_history))
+            chat_task = asyncio.create_task(classify())
+            state.chat_task = chat_task
+            result = await asyncio.wait_for(chat_task, DECISION_TIMEOUT)
+            intent = result.chat_intent if isinstance(result, Plan) else None
+            if revision != state.revision or intent is None or intent.message_id != line["id"] or not intent.addressed:
+                return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
+            return {"handled": intent.mode != "ignore", "queued": False, "mode": intent.mode, "objective": intent.objective, "reply": intent.reply}
+        except asyncio.CancelledError:
+            if revision != state.revision or not state.chat_listening:
+                return {"handled":False,"queued":False,"mode":"ignore","objective":"","reply":""}
+            raise
+        except (ProviderError, TimeoutError) as exc:
+            if isinstance(exc, (ProviderUnavailable, TimeoutError)): state.retry_after = time.monotonic() + 15
+            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited)):
+                state.chat_suspended = True
+                state.provider_error = {"provider":state.provider,"model":state.model,"message":str(exc),"detail":exc.diagnostic}
+            state.event("chat", str(exc) if isinstance(exc, ProviderError) else "Время ожидания контекстного обращения истекло")
+            return {"handled":False,"queued":False,"mode":"ignore","objective":"","reply":""}
+        finally:
+            if state.chat_task is chat_task:
+                state.chat_busy = False
+                state.chat_task = None
 
     @app.post("/api/decision", dependencies=[Depends(authenticate)])
     async def decision(snapshot: Snapshot):
@@ -287,12 +373,21 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             state.session_id = snapshot.session_id
             state.last_sequence = 0
             state.revision += 1
+            state.cancel_chat()
+            state.chat_history.clear()
             state.planner.reset()
             # A reconnected/new character always starts stopped.
             state.command = Command(mode="stop", objective=state.command.objective)
         if snapshot.sequence <= state.last_sequence:
             raise HTTPException(409, "Устаревшее наблюдение")
         state.last_sequence = snapshot.sequence
+        if state.chat_listening and not snapshot.listen_chat:
+            state.cancel_chat()
+            policy = state.planner.combat_policy
+            state.planner.reset()
+            state.planner.combat_policy = policy
+            state.chat_history.clear()
+        state.chat_listening = snapshot.listen_chat
         state.last_seen = now
         state.last_snapshot = snapshot
         state.snapshot_error = None
@@ -307,7 +402,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             result, source, plan_id = state.planner.decision(snapshot)
             result = validate_decision(result, snapshot)
             return DecisionReply(**result.model_dump(), sequence=snapshot.sequence, source=source,
-                                 command_revision=state.revision, plan_id=plan_id, mode=state.command.mode)
+                                 command_revision=state.revision, plan_id=plan_id, mode=state.command.mode,
+                                 avoid_combat=state.planner.combat_policy == "avoid")
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
         elif mode == "follow":

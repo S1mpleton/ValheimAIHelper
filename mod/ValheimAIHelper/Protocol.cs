@@ -14,6 +14,12 @@ namespace ValheimAIHelper;
     public float damage, durability = 1, food_health, food_stamina;
     public bool usable;
     public bool can_eat = true;
+    public float weight;
+    public int tool_tier;
+    public string effect = "";
+    public int quality = 1, max_quality = 1;
+    public float armor, block_power;
+    public string ammo_type = "", skill = "", damage_types = "";
 }
 [Serializable] public sealed class Actor
 {
@@ -25,6 +31,13 @@ namespace ValheimAIHelper;
     public int food_slots;
     public string weapon = "", biome = "";
     public bool blocking, swimming, encumbered;
+    public float carry_weight, max_carry_weight = 300, eitr;
+    public int free_slots, comfort;
+    public bool sheltered, rested, wet, cold, attached, sitting;
+    public string station_id = "";
+    public string[] status_effects = Array.Empty<string>();
+    public string guardian_power = "";
+    public float guardian_cooldown;
     public InventoryEntry[] inventory = Array.Empty<InventoryEntry>();
 }
 [Serializable] public sealed class Entity
@@ -35,6 +48,19 @@ namespace ValheimAIHelper;
     public float health, max_health;
     public bool targeting_us, targeting_leader, attacking;
     public string category = "";
+    public string state = "";
+    public int tool_tier;
+}
+[Serializable] public sealed class RecipeOption
+{
+    public string id = "", name = "", station = "", requirements = "";
+    public bool craftable;
+    public int amount = 1;
+}
+[Serializable] public sealed class BuildOption
+{
+    public string id = "", name = "", requirements = "", category = "";
+    public bool available;
 }
 [Serializable] public sealed class Snapshot
 {
@@ -45,8 +71,14 @@ namespace ValheimAIHelper;
     public Entity[] entities = Array.Empty<Entity>();
     public string leader_id = "", previous_result = "";
     public bool background_planning;
+    public bool listen_chat = true;
     public string plan_id = "", action_status = "";
     public string[] recent_events = Array.Empty<string>();
+    public RecipeOption[] recipes = Array.Empty<RecipeOption>();
+    public BuildOption[] build_options = Array.Empty<BuildOption>();
+    public string container_id = "", weather = "";
+    public InventoryEntry[] container_inventory = Array.Empty<InventoryEntry>();
+    public bool daylight = true;
     public string[] supported_actions = { "wait", "follow", "move", "attack", "pickup", "eat", "equip" };
 }
 [Serializable] public sealed class BridgeError { public string detail = ""; }
@@ -57,4 +89,7 @@ namespace ValheimAIHelper;
     [DataMember] public float duration;
     [DataMember] public Position? destination;
     [DataMember] public bool run;
+    [DataMember] public bool avoid_combat;
+    [DataMember] public string item_id = "", text = "";
+    [DataMember] public int amount, rotation;
 }

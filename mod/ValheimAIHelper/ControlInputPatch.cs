@@ -39,6 +39,8 @@ internal static class ControlInputPatch
         jump = intent.Jump;
         run = intent.Run;
         dodge = intent.Dodge;
-        secondaryAttack = secondaryAttackHold = crouch = autoRun = false;
+        secondaryAttack = intent.Secondary;
+        crouch = intent.Crouch;
+        secondaryAttackHold = autoRun = false;
     }
 }

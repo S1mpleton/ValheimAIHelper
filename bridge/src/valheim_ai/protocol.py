@@ -28,6 +28,16 @@ class InventoryItem(StrictModel):
     food_stamina: float = Field(default=0, ge=0)
     usable: bool = False
     can_eat: bool = True
+    weight: float = Field(default=0, ge=0)
+    tool_tier: int = Field(default=0, ge=0, le=20)
+    effect: str = Field(default="", max_length=120)
+    quality: int = Field(default=1, ge=1, le=100)
+    max_quality: int = Field(default=1, ge=1, le=100)
+    armor: float = Field(default=0, ge=0)
+    block_power: float = Field(default=0, ge=0)
+    ammo_type: str = Field(default="", max_length=80)
+    skill: str = Field(default="", max_length=80)
+    damage_types: str = Field(default="", max_length=240)
 
 
 class Actor(StrictModel):
@@ -45,6 +55,21 @@ class Actor(StrictModel):
     swimming: bool = False
     encumbered: bool = False
     biome: str = Field(default="", max_length=80)
+    carry_weight: float = Field(default=0, ge=0)
+    max_carry_weight: float = Field(default=300, gt=0)
+    free_slots: int = Field(default=0, ge=0, le=256)
+    comfort: int = Field(default=0, ge=0, le=100)
+    sheltered: bool = False
+    rested: bool = False
+    wet: bool = False
+    cold: bool = False
+    attached: bool = False
+    sitting: bool = False
+    eitr: float = Field(default=0, ge=0)
+    station_id: str = Field(default="", max_length=100)
+    status_effects: list[str] = Field(default_factory=list, max_length=20)
+    guardian_power: str = Field(default="", max_length=120)
+    guardian_cooldown: float = Field(default=0, ge=0)
     inventory: list[InventoryItem] = Field(default_factory=list, max_length=64)
 
     @field_validator("health", "stamina", mode="before")
@@ -69,7 +94,7 @@ class Actor(StrictModel):
 class Entity(StrictModel):
     id: str = Field(min_length=1, max_length=100)
     name: str = Field(max_length=120)
-    kind: str = Field(pattern="^(player|enemy|item|interactable)$")
+    kind: str = Field(pattern="^(player|enemy|animal|resource|item|interactable)$")
     position: Vec3
     distance: float = Field(ge=0, le=200)
     health: float = Field(default=0, ge=0)
@@ -78,6 +103,25 @@ class Entity(StrictModel):
     targeting_leader: bool = False
     attacking: bool = False
     category: str = Field(default="", max_length=40)
+    state: str = Field(default="", max_length=240)
+    tool_tier: int = Field(default=0, ge=0, le=20)
+
+
+class RecipeOption(StrictModel):
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(max_length=120)
+    station: str = Field(default="", max_length=120)
+    requirements: str = Field(default="", max_length=500)
+    craftable: bool = False
+    amount: int = Field(default=1, ge=1, le=10000)
+
+
+class BuildOption(StrictModel):
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(max_length=120)
+    requirements: str = Field(default="", max_length=500)
+    available: bool = False
+    category: str = Field(default="", max_length=80)
 
 
 class Snapshot(StrictModel):
@@ -89,18 +133,26 @@ class Snapshot(StrictModel):
     leader_id: str = Field(default="", max_length=100)
     previous_result: str = Field(default="", max_length=240)
     background_planning: bool = False
+    listen_chat: bool = True
     plan_id: str = Field(default="", max_length=80)
     action_status: str = Field(default="", pattern="^(|running|success|blocked)$")
     recent_events: list[str] = Field(default_factory=list, max_length=8)
+    recipes: list[RecipeOption] = Field(default_factory=list, max_length=24)
+    build_options: list[BuildOption] = Field(default_factory=list, max_length=32)
+    container_id: str = Field(default="", max_length=100)
+    container_inventory: list[InventoryItem] = Field(default_factory=list, max_length=64)
+    daylight: bool = True
+    weather: str = Field(default="", max_length=80)
     # An old mod never receives an action its executor does not understand.
     supported_actions: list[str] = Field(
         default_factory=lambda: ["wait", "follow", "attack", "pickup", "eat", "equip"],
-        max_length=24,
+        max_length=64,
     )
 
     @model_validator(mode="after")
     def unique_ids(self):
-        ids = [e.id for e in self.entities] + [i.id for i in self.actor.inventory]
+        ids = [e.id for e in self.entities] + [i.id for i in self.actor.inventory] + [i.id for i in self.container_inventory]
+        ids += [r.id for r in self.recipes] + [b.id for b in self.build_options]
         if len(ids) != len(set(ids)):
             raise ValueError("Object IDs must be unique within a snapshot")
         if self.leader_id and not any(
@@ -124,6 +176,33 @@ class Action(str, Enum):
     JUMP = "jump"
     INTERACT = "interact"
     USE = "use"
+    DROP = "drop"
+    UNEQUIP = "unequip"
+    HIDE_WEAPON = "hide_weapon"
+    SHOW_WEAPON = "show_weapon"
+    SNEAK = "sneak"
+    UNSNEAK = "unsneak"
+    REST = "rest"
+    STAND = "stand"
+    GUARDIAN_POWER = "guardian_power"
+    EMOTE = "emote"
+    SPEAK = "speak"
+    LOOK = "look"
+    SECONDARY_ATTACK = "secondary_attack"
+    HUNT = "hunt"
+    GATHER = "gather"
+    OPEN = "open"
+    CLOSE = "close"
+    TAKE = "take"
+    DEPOSIT = "deposit"
+    STACK = "stack"
+    CRAFT = "craft"
+    UPGRADE = "upgrade"
+    REPAIR = "repair"
+    BUILD = "build"
+    REPAIR_BUILDING = "repair_building"
+    USE_ON = "use_on"
+    SLEEP = "sleep"
 
 
 class Decision(StrictModel):
@@ -133,6 +212,15 @@ class Decision(StrictModel):
     say: str = Field(max_length=240)
     destination: Vec3 | None = None
     run: bool = False
+    item_id: str = Field(default="", max_length=100)
+    amount: int = Field(default=1, ge=1, le=100000)
+    text: str = Field(default="", max_length=220)
+    rotation: int = Field(default=0, ge=0, le=15)
+
+    @field_validator("text")
+    @classmethod
+    def safe_text(cls, value):
+        return "".join(c for c in value if c.isprintable()).strip()
 
     @field_validator("say")
     @classmethod
@@ -147,11 +235,23 @@ class DecisionReply(Decision):
     command_revision: int
     plan_id: str = ""
     mode: str = "stop"
+    avoid_combat: bool = False
+
+
+class ChatIntent(StrictModel):
+    message_id: int = Field(ge=0)
+    addressed: bool
+    mode: str = Field(pattern="^(ignore|task|follow|stop|reply)$")
+    objective: str = Field(max_length=1000)
+    reply: str = Field(max_length=220)
 
 
 class Plan(StrictModel):
     """Short executable plan; each step is leased to the mod for at most 3 seconds."""
     steps: list[Decision] = Field(min_length=1, max_length=6)
+    chat_intent: ChatIntent | None = None
+    combat_policy: str = Field(default="defend", pattern="^(defend|avoid)$")
+    objective_complete: bool = False
 
 
 def wait(reason: str = "") -> Decision:
@@ -160,12 +260,25 @@ def wait(reason: str = "") -> Decision:
 
 def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     """Never accept invented targets or arbitrary code from a provider."""
-    if decision.destination is not None and decision.action not in (Action.MOVE, Action.JUMP):
+    if decision.destination is not None and decision.action not in (Action.MOVE, Action.JUMP, Action.BUILD, Action.LOOK):
         raise ValueError("Only movement can specify a destination")
     if decision.action == Action.WAIT:
         return decision.model_copy(update={"target_id": ""})
     if decision.action.value not in snapshot.supported_actions:
         raise ValueError("This mod does not support the requested action")
+    no_target = {Action.HIDE_WEAPON, Action.SHOW_WEAPON, Action.SNEAK, Action.UNSNEAK, Action.REST,
+                 Action.STAND, Action.GUARDIAN_POWER, Action.EMOTE, Action.SPEAK, Action.CLOSE}
+    if decision.action in no_target:
+        if decision.target_id: raise ValueError("This action has no target")
+        if decision.action == Action.EMOTE and decision.text not in ("wave", "cheer", "point", "sit", "bow", "challenge", "cry", "nonono", "thumbsup"):
+            raise ValueError("Unknown game emote")
+        if decision.action == Action.SPEAK and not decision.text: raise ValueError("Empty chat message")
+        return decision
+    if decision.action == Action.LOOK:
+        if decision.destination is None: raise ValueError("Look needs a point")
+        a, b = snapshot.actor.position, decision.destination
+        if math.dist((a.x,a.y,a.z),(b.x,b.y,b.z)) > 60: raise ValueError("Look point too far")
+        return decision
     if decision.action in (Action.MOVE, Action.JUMP):
         if decision.target_id != "":
             raise ValueError("Forward movement has no arbitrary target")
@@ -181,9 +294,22 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     entities = {e.id: e for e in snapshot.entities}
     inventory = {i.id: i for i in snapshot.actor.inventory}
     target = entities.get(decision.target_id)
+    if decision.action in (Action.CRAFT, Action.UPGRADE):
+        recipe = next((r for r in snapshot.recipes if r.id == decision.target_id), None)
+        if recipe is None: raise ValueError("Unknown recipe")
+        if decision.amount > 10 or (decision.action == Action.UPGRADE and decision.amount != 1): raise ValueError("Craft batches are 1..10 operations; upgrade is one operation")
+        if decision.action == Action.CRAFT and not recipe.craftable: raise ValueError("Native crafting requirements not met")
+        if decision.action == Action.UPGRADE and decision.item_id not in inventory: raise ValueError("Missing upgrade item")
+        return decision
+    if decision.action == Action.BUILD:
+        option = next((b for b in snapshot.build_options if b.id == decision.target_id), None)
+        if option is None or not option.available or decision.destination is None: raise ValueError("Unavailable building piece or position")
+        a, b = snapshot.actor.position, decision.destination
+        if math.dist((a.x,a.y,a.z),(b.x,b.y,b.z)) > 8: raise ValueError("Build point too far")
+        return decision
     if decision.action == Action.FOLLOW:
         valid = target is not None and target.kind == "player" and target.id == snapshot.leader_id
-    elif decision.action in (Action.ATTACK, Action.DEFEND, Action.FLEE, Action.DODGE):
+    elif decision.action in (Action.ATTACK, Action.SECONDARY_ATTACK, Action.DEFEND, Action.FLEE, Action.DODGE):
         valid = target is not None and target.kind == "enemy" and target.distance <= 20
     elif decision.action == Action.PICKUP:
         valid = target is not None and target.kind == "item" and target.distance <= 20
@@ -195,6 +321,25 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
         valid = decision.target_id in inventory and inventory[decision.target_id].usable
     elif decision.action == Action.INTERACT:
         valid = target is not None and target.kind == "interactable" and target.distance <= 20
+    elif decision.action in (Action.DROP, Action.UNEQUIP):
+        valid = decision.target_id in inventory and (decision.action != Action.DROP or decision.amount <= inventory[decision.target_id].count)
+    elif decision.action == Action.HUNT:
+        valid = target is not None and target.kind == "animal"
+    elif decision.action == Action.GATHER:
+        valid = target is not None and target.kind == "resource"
+    elif decision.action in (Action.OPEN, Action.TAKE, Action.DEPOSIT, Action.STACK):
+        valid = target is not None and target.category == "container"
+        if decision.action in (Action.TAKE, Action.DEPOSIT):
+            items = inventory if decision.action == Action.DEPOSIT else {i.id:i for i in snapshot.container_inventory}
+            valid = valid and snapshot.container_id == decision.target_id and decision.item_id in items and decision.amount <= items[decision.item_id].count
+    elif decision.action == Action.USE_ON:
+        valid = target is not None and target.kind == "interactable" and decision.item_id in inventory and decision.amount <= inventory[decision.item_id].count
+    elif decision.action == Action.REPAIR:
+        valid = target is not None and target.category == "station"
+    elif decision.action == Action.REPAIR_BUILDING:
+        valid = target is not None and target.category == "structure"
+    elif decision.action == Action.SLEEP:
+        valid = target is not None and target.category == "bed"
     else:
         valid = False
     if not valid:

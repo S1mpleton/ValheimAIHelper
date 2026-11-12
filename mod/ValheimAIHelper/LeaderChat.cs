@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -8,36 +9,79 @@ namespace ValheimAIHelper;
 public sealed partial class Plugin
 {
     private float lastChatCommand;
+    private readonly Queue<LeaderChatRequest> chatQueue = new();
+    private bool processingChat;
     internal static void ReceiveLeaderChat(GameObject go, long sender, Talker.Type type, string text)
     {
         var plugin = instance;
         if (plugin == null || !plugin.allowChat.Value || !Player.m_localPlayer || type == Talker.Type.Ping) return;
-        string? command = LeaderCommand.Parse(text);
-        if (command == null) return;
+        if (text.Length == 0 || text.Length > 1000 || text.StartsWith("[AI]", StringComparison.Ordinal)) return;
         var leader = plugin.FindLeader();
         if (leader == null || !leader || leader == Player.m_localPlayer) return;
         var view = leader.GetComponent<ZNetView>();
         // Match native network identity, never a display name supplied in chat.
         if (!view || !view.IsValid() || view.GetZDO().GetOwner() != sender ||
             (go && go.GetComponent<Player>() != leader)) return;
+        bool addressed = LeaderCommand.Addressed(text, Player.m_localPlayer.GetPlayerName(), out string command);
+        if (!addressed)
+        {
+            if (plugin.HasKey(plugin.uiProvider))
+            {
+                while (plugin.chatQueue.Count >= 6) plugin.chatQueue.Dequeue();
+                plugin.chatQueue.Enqueue(new LeaderChatRequest { actor_name = Player.m_localPlayer.GetPlayerName(), speaker = leader.GetPlayerName(), text = text });
+                if (!plugin.processingChat) plugin.StartCoroutine(plugin.ProcessOrdinaryChat());
+            }
+            return;
+        }
         string normalized = command.ToLowerInvariant();
-        if (normalized is "стоп" or "stop" or "стой")
+        if (normalized is "стоп" or "stop" or "стой" or "остановись")
         { plugin.StopFromPanel(); plugin.ChatReply("Остановлен. Управление возвращено игроку."); return; }
         if (Time.realtimeSinceStartup - plugin.lastChatCommand < 1) return;
         plugin.lastChatCommand = Time.realtimeSinceStartup;
         plugin.AddLog("leader", command);
         if (normalized is "" or "помощь" or "help")
-        { plugin.ChatReply("!ai следуй · !ai стоп · !ai статус · !ai бой вкл/выкл · !ai <задача>"); return; }
+        { plugin.ChatReply("Обратитесь ко мне по имени: «" + Player.m_localPlayer.GetPlayerName() + ", подбери камни». Можно также продолжать разговор без имени."); return; }
         if (normalized is "статус" or "status")
         { plugin.ChatReply(plugin.active ? plugin.executor.Result : "Остановлен. " + plugin.uiError); return; }
-        if (normalized is "бой вкл" or "бой выкл")
+        if (normalized is "бой вкл" or "бой выкл" or "не сражайся" or "не атакуй" or "избегай боя")
         { plugin.allowCombat.Value = normalized == "бой вкл"; plugin.ChatReply(plugin.allowCombat.Value ? "Бой разрешён." : "Бой выключен."); return; }
         if (normalized is "еда вкл" or "еда выкл")
         { plugin.autoSurvival.Value = normalized == "еда вкл"; plugin.ChatReply(plugin.autoSurvival.Value ? "Автоматическая еда включена." : "Автоматическая еда выключена."); return; }
         if (plugin.uiBusy) { plugin.ChatReply("Выполняется настройка AI. Повторите команду через несколько секунд; стоп доступен всегда."); return; }
-        string mode = normalized is "следуй" or "за мной" or "follow" ? "follow" : "ai";
+        string mode = normalized is "следуй" or "следуй за мной" or "за мной" or "follow" ? "follow" : "ai";
+        if (mode == "ai" && plugin.active && plugin.requestedMode == "ai" && plugin.HasKey(plugin.uiProvider))
+        {
+            while (plugin.chatQueue.Count >= 6) plugin.chatQueue.Dequeue();
+            plugin.chatQueue.Enqueue(new LeaderChatRequest { actor_name=Player.m_localPlayer.GetPlayerName(), speaker=leader.GetPlayerName(), text=text, explicit_address=true });
+            if (!plugin.processingChat) plugin.StartCoroutine(plugin.ProcessOrdinaryChat());
+            return;
+        }
         if (mode == "ai") plugin.uiObjective = command;
         plugin.StartCoroutine(plugin.CommandFromChat(mode));
+    }
+    private IEnumerator ProcessOrdinaryChat()
+    {
+        processingChat = true;
+        try
+        {
+            while (chatQueue.Count > 0 && allowChat.Value && uiClient != null)
+            {
+                var request = chatQueue.Dequeue(); int epoch = uiOperation;
+                LeaderChatReply? reply = null;
+                yield return uiClient.Request<LeaderChatReply>("/api/chat", request, value => reply = value,
+                    error => AddLog("chat", error));
+                if (!allowChat.Value || epoch != uiOperation || reply == null || !reply.handled) continue;
+                if (reply.mode == "stop") { StopFromPanel(); if (reply.reply.Length > 0) ChatReply(reply.reply); }
+                else if (reply.mode is "task" or "follow")
+                {
+                    if (uiBusy) continue;
+                    if (reply.objective.Length > 0) uiObjective = reply.objective;
+                    yield return CommandFromChat(reply.mode == "follow" ? "follow" : "ai");
+                }
+                else if (reply.reply.Length > 0) ChatReply(reply.reply);
+            }
+        }
+        finally { processingChat = false; }
     }
     private IEnumerator CommandFromChat(string mode)
     {

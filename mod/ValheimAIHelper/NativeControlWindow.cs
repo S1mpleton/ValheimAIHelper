@@ -15,7 +15,7 @@ public sealed partial class Plugin
     {
         private readonly Plugin p;
         private GameObject? root, frame;
-        private Component? buttonTemplate, textTemplate, imageTemplate, inputTemplate;
+        private Component? buttonTemplate, textTemplate, imageTemplate;
         private readonly List<GameObject> pages = new();
         private readonly List<Component> busyButtons = new();
         private Component? stateLabel, messageLabel, leaderLabel, combatButton, foodButton, chatButton, logText;
@@ -95,10 +95,12 @@ public sealed partial class Plugin
         }
         private Component Button(Transform parent, string text, float x, float y, float w, Action click, bool busy = false)
         {
-            var obj = UnityEngine.Object.Instantiate(buttonTemplate!.gameObject, parent, false);
-            obj.name = "AI " + text; Clean(obj);
-            Place(obj, parent, x, y, w, 42);
-            var button = obj.GetComponent(buttonTemplate.GetType());
+            var obj = Box("AI " + text, parent, x, y, w, 42);
+            Image(obj, new Color(.28f, .22f, .14f, 1), false);
+            var button = obj.AddComponent(Type("UnityEngine.UI.Button"));
+            Set(button, "targetGraphic", obj.GetComponent(Type("UnityEngine.UI.Image")));
+            var buttonCaption = Label(obj.transform, text, 8, 7, w - 16, 30, 20);
+            EnumValue(buttonCaption, "alignment", "Center"); Set(buttonCaption, "color", new Color(1, .73f, .27f));
             Navigation(button);
             var prop = button.GetType().GetProperty("onClick")!;
             var evt = (UnityEvent)Activator.CreateInstance(prop.PropertyType); evt.AddListener(() => click()); prop.SetValue(button, evt, null);
@@ -114,9 +116,17 @@ public sealed partial class Plugin
         private Component InputField(Transform parent, string value, float x, float y, float w, float h,
             int limit, Action<string> changed, bool password = false, bool multiline = false)
         {
-            var obj = UnityEngine.Object.Instantiate(inputTemplate!.gameObject, parent, false);
-            Clean(obj); obj.name = "AI input"; Place(obj, parent, x, y, w, h);
-            var input = obj.GetComponent(inputTemplate.GetType());
+            // Construct the input from loaded UI types: Valheim 1.x wraps its
+            // inputs in GUIFramework and need not contain a TMP input template.
+            var obj = Box("AI input", parent, x, y, w, h);
+            Image(obj, new Color(.08f, .075f, .06f, .96f), false);
+            var input = obj.AddComponent(Type("TMPro.TMP_InputField"));
+            var area = Box("Viewport", obj.transform, 10, 6, w - 20, h - 12);
+            area.AddComponent(Type("UnityEngine.UI.RectMask2D"));
+            var content = Label(area.transform, "", 0, 0, w - 20, h - 12, 20);
+            Set(input, "textViewport", area.GetComponent<RectTransform>());
+            Set(input, "textComponent", content);
+            Set(input, "targetGraphic", obj.GetComponent(Type("UnityEngine.UI.Image")));
             Navigation(input);
             foreach (var prop in input.GetType().GetProperties().Where(pr => pr.CanWrite && typeof(UnityEventBase).IsAssignableFrom(pr.PropertyType)))
                 prop.SetValue(input, Activator.CreateInstance(prop.PropertyType), null);
@@ -153,24 +163,23 @@ public sealed partial class Plugin
             Dispose();
             var menu = Menu.instance;
             if (!menu) throw new InvalidOperationException("Game menu is not loaded");
-            var nativeRoot = AccessTools.Field(typeof(Menu), "m_root")?.GetValue(menu) as Transform;
-            var settings = AccessTools.Field(typeof(Menu), "m_settingsPrefab")?.GetValue(menu) as GameObject;
-            var source = settings ? settings! : menu.gameObject;
-            buttonTemplate = Find(source, "Button") ?? AccessTools.Field(typeof(Menu), "saveButton")?.GetValue(menu) as Component;
-            textTemplate = Find(source, "TextMeshProUGUI");
-            imageTemplate = source.GetComponentsInChildren<Component>(true).Where(c => c && c.GetType().Name == "Image" && Get(c, "sprite") != null)
+            buttonTemplate = GameUi.MenuButton(menu);
+            textTemplate = GameUi.Font(menu);
+            imageTemplate = GameUi.Components(menu, "UnityEngine.UI.Image").Where(c => Get(c, "sprite") != null)
                 .OrderByDescending(c => c.transform is RectTransform r ? Math.Abs(r.rect.width * r.rect.height) : 0).FirstOrDefault();
-            inputTemplate = Chat.instance ? Find(Chat.instance.gameObject, "TMP_InputField") : null;
-            inputTemplate ??= Find(source, "TMP_InputField");
-            if (!nativeRoot || buttonTemplate == null || textTemplate == null || inputTemplate == null)
-                throw new InvalidOperationException("Native UI templates unavailable");
+            if (textTemplate == null) throw new InvalidOperationException("Не найден загруженный шрифт TMP. " + GameUi.Describe(menu));
             root = new GameObject("Valheim AI Control", typeof(RectTransform)); root.SetActive(false);
-            var rect = (RectTransform)root.transform; rect.SetParent(nativeRoot!.parent, false);
+            var canvas = root.AddComponent(Type("UnityEngine.Canvas"));
+            EnumValue(canvas, "renderMode", "ScreenSpaceOverlay"); Set(canvas, "sortingOrder", 30000);
+            var scaler = root.AddComponent(Type("UnityEngine.UI.CanvasScaler"));
+            EnumValue(scaler, "uiScaleMode", "ScaleWithScreenSize"); Set(scaler, "referenceResolution", new Vector2(1280, 800));
+            root.AddComponent(Type("UnityEngine.UI.GraphicRaycaster"));
+            var rect = (RectTransform)root.transform;
             rect.anchorMin = Vector2.zero; rect.anchorMax = Vector2.one; rect.offsetMin = rect.offsetMax = Vector2.zero;
             root.transform.SetAsLastSibling(); Image(root, new Color(0, 0, 0, .72f), false);
             frame = Box("Settings panel", root.transform, 0, 0, 920, 700);
             var fr = (RectTransform)frame.transform; fr.anchorMin = fr.anchorMax = fr.pivot = new Vector2(.5f, .5f); fr.anchoredPosition = Vector2.zero;
-            Image(frame, Color.white);
+            Image(frame, imageTemplate != null ? Color.white : new Color(.16f, .13f, .095f, 1));
             Label(frame.transform, "УПРАВЛЕНИЕ ПЕРСОНАЖЕМ", 32, 22, 850, 40, 29);
             stateLabel = Label(frame.transform, "", 32, 68, 850, 28, 18);
             Button(frame.transform, "Персонаж", 30, 110, 278, () => { page = 0; ShowPage(); });
@@ -178,7 +187,7 @@ public sealed partial class Plugin
             Button(frame.transform, "Журнал", 610, 110, 278, () => { page = 2; ShowPage(); });
             for (int i = 0; i < 3; i++) pages.Add(Box("Tab " + i, frame.transform, 30, 165, 860, 425));
             BuildCharacter(pages[0].transform); BuildConnection(pages[1].transform); BuildJournal(pages[2].transform);
-            messageLabel = Label(frame.transform, "", 32, 596, 850, 50, 18);
+            messageLabel = Label(frame.transform, "", 32, 610, 850, 34, 17);
             Button(frame.transform, "Назад", 30, 651, 170, () => { p.SetPanel(false); if (Menu.instance) Menu.instance.Show(); });
             Label(frame.transform, "F8 — окно управления     F9 — немедленный стоп", 226, 662, 650, 28, 17);
             built = true;
@@ -195,7 +204,7 @@ public sealed partial class Plugin
             combatButton = Button(tab, "", 0, 236, 277, () => p.allowCombat.Value = !p.allowCombat.Value);
             foodButton = Button(tab, "", 290, 236, 277, () => p.autoSurvival.Value = !p.autoSurvival.Value);
             chatButton = Button(tab, "", 580, 236, 280, () => p.allowChat.Value = !p.allowChat.Value);
-            Label(tab, "В чате лидера: !ai следуй · !ai стоп · !ai статус\n!ai защищай меня и собирай выпавшие предметы\nКоманды принимает только выбранный лидер. Для дальнего сообщения: /s !ai ...", 0, 302, 860, 94, 20);
+            Label(tab, "Обратитесь по имени персонажа: «Бъерн, подбери камни».\nПродолжения без имени AI оценивает по контексту.\nЧат лидера отправляется выбранному AI; дальние сообщения — /s.", 0, 302, 860, 94, 20);
             Label(tab, "Следование работает без ключа. AI и проверка модели расходуют квоту API.", 0, 398, 860, 30, 17);
         }
         private void BuildConnection(Transform tab)
@@ -236,7 +245,7 @@ public sealed partial class Plugin
         {
             if (!Ready || !p.showPanel || (!force && Time.realtimeSinceStartup < nextRefresh)) return;
             nextRefresh = Time.realtimeSinceStartup + .2f;
-            var parent = root!.transform.parent as RectTransform;
+            var parent = root!.transform as RectTransform;
             float scale = parent != null ? Mathf.Min(1, (parent.rect.width - 30) / 920, (parent.rect.height - 30) / 700) : 1;
             frame!.transform.localScale = Vector3.one * Mathf.Max(.2f, scale);
             Set(stateLabel!, "text", !p.active ? "Ручное управление" : p.executor.Result + (p.bridgeStatus?.planning == true ? " · AI обдумывает план" : ""));

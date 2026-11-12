@@ -10,6 +10,7 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge/src"))
 from valheim_ai.app import create_app
+from valheim_ai.protocol import Action
 
 
 async def main():
@@ -17,6 +18,8 @@ async def main():
     subprocess.run(["dotnet", "build", str(project), "-c", "Release", "--nologo", "--verbosity", "quiet"], check=True, timeout=60)
     program = project.parent / "bin/Release/net8.0/ValheimAIHelper.WireProbe.dll"
     encoded = subprocess.check_output(["dotnet", str(program)], timeout=10)
+    capabilities = json.loads(subprocess.check_output(["dotnet", str(program), "--capabilities"], timeout=10))
+    assert set(capabilities) == {a.value for a in Action}, "Mod/bridge action catalog mismatch"
     original = json.loads(encoded)
     assert original["actor"]["name"] == "Бьёрн"
     token = "wire-probe-local-token-not-a-provider-key"
@@ -27,6 +30,10 @@ async def main():
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
                 "action": "wait", "target_id": "", "duration": 1, "say": "Связь работает"
             })}}]})
+        if b"wire-extended" in request.content:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"steps": [{
+                "action":"drop", "target_id":"inventory:stones", "amount":5, "duration":1, "say":"Выбрасываю пять камней"
+            }]})}}]})
         if b'"steps"' in request.content:
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"steps": [{
                 "action": "move", "target_id": "", "duration": 2, "say": "Иду к точке",
@@ -85,9 +92,26 @@ async def main():
             assert stopped.status_code == 200
             result = subprocess.check_output(["dotnet", str(program), "--read-ui-ok"], input=stopped.content, timeout=10)
             assert result.strip() == b"UI_OK"
+            # A real 0.4 mod snapshot advertises the same actions and quantity fields.
+            extended_bytes = subprocess.check_output(["dotnet", str(program), "--extended", "1"], timeout=10)
+            extended = json.loads(extended_bytes)
+            first_extended = await client.post("/api/decision", content=extended_bytes, headers={"Content-Type":"application/json"})
+            assert first_extended.status_code == 200, first_extended.text
+            await client.post("/api/command",json={"mode":"ai","objective":"Выбрось 5 камней"})
+            planned_extended = await client.post("/api/decision",json={**extended,"sequence":2})
+            task = app.state.bridge.planner.task
+            if task is not None: await task
+            planned_extended = await client.post("/api/decision",json={**extended,"sequence":3})
+            result = subprocess.check_output(["dotnet",str(program),"--check-extended-response","3"],input=planned_extended.content,timeout=10)
+            assert result.strip()==b"DROP_ACCEPTED:5",planned_extended.text
+            chat_bytes = subprocess.check_output(["dotnet",str(program),"--ui-chat"],timeout=10)
+            chatted = await client.post("/api/chat",content=chat_bytes,headers={"Content-Type":"application/json"})
+            assert chatted.status_code==200 and chatted.json()["queued"],chatted.text
+            await app.state.bridge.planner.close()
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
     print("PASS: background plan -> destination/run/plan ID -> C# policy")
+    print("PASS: all action names match; actual C# extended snapshot -> quantity drop decision -> C# policy; ordinary chat DTO")
 
 
 if __name__ == "__main__":

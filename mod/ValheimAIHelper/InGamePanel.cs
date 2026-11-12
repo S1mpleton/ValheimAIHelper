@@ -19,7 +19,7 @@ public sealed partial class Plugin
     private bool uiBusy, uiPolling, uiHydrated, uiSettings, uiModelList, uiJournal;
     private float nextUiPoll;
     private int uiOperation;
-    private string loggedUiError = "";
+    private string loggedUiError = "", lastStatusError = "";
     private Vector2 panelScroll, modelScroll;
     private GUIStyle? titleStyle, hintStyle, panelButtonStyle, panelErrorStyle;
 
@@ -49,8 +49,18 @@ public sealed partial class Plugin
     {
         var plugin = instance;
         if (plugin?.menuIntegration == null) return;
-        try { plugin.menuIntegration.Install(menu); }
-        catch (Exception ex) { plugin.Logger.LogWarning("AI menu entry: " + ex.GetType().Name + ". F8 remains available."); }
+        try
+        {
+            bool wasInstalled = plugin.menuIntegration.Installed;
+            plugin.menuIntegration.Install(menu);
+            if (!wasInstalled && plugin.menuIntegration.Installed) plugin.AddLog("menu", "Пункт «Управление персонажем» добавлен в Esc. " + GameUi.Describe(menu));
+            if (!plugin.menuIntegration.Installed)
+            {
+                string detail = "Не найден образец кнопки Esc. " + GameUi.Describe(menu);
+                if (plugin.menuProbeError != detail) { plugin.menuProbeError = detail; plugin.AddLog("menu", detail); }
+            }
+        }
+        catch (Exception ex) { plugin.AddLog("menu", ex.ToString() + "; " + GameUi.Describe(menu)); }
     }
 
     private void OpenPanelFromMenu()
@@ -71,7 +81,7 @@ public sealed partial class Plugin
             nativeWindow ??= new NativeControlWindow(this);
             nativeWindow.Open();
         }
-        catch (Exception ex) { AddLog("ui", "Штатные элементы меню недоступны: " + ex.GetType().Name + ". Открыта резервная панель F8."); }
+        catch (Exception ex) { AddLog("ui", "Игровое окно: " + ex + ". Открыта резервная панель F8."); }
         nextUiPoll = 0;
         StartCoroutine(RefreshPanelStatus());
     }
@@ -81,7 +91,7 @@ public sealed partial class Plugin
         if (uiError != loggedUiError) { loggedUiError = uiError; if (uiError.Length > 0) AddLog("error", uiError); }
         try { nativeWindow?.Refresh(); }
         catch (Exception ex) { nativeWindow?.Dispose(); AddLog("ui", "Ошибка игрового окна: " + ex.GetType().Name + ". Используется резервная панель."); }
-        if ((showPanel || active) && !uiPolling && Time.realtimeSinceStartup >= nextUiPoll)
+        if ((showPanel || active || (allowChat.Value && Player.m_localPlayer)) && !uiPolling && Time.realtimeSinceStartup >= nextUiPoll)
             StartCoroutine(RefreshPanelStatus());
     }
 
@@ -96,7 +106,10 @@ public sealed partial class Plugin
             {
                 if (operation != uiOperation) return;
                 bridgeStatus = value;
+                if (uiError == lastStatusError) uiError = "";
+                lastStatusError = "";
                 ImportEvents(value);
+                if (!uiBusy && value.mode == "ai" && value.objective != savedObjective.Value) { uiObjective = value.objective; savedObjective.Value = value.objective; }
                 if (value.provider_error != null)
                     uiError = value.provider_error.message + (!string.IsNullOrEmpty(value.provider_error.detail) ? " Ответ API: " + value.provider_error.detail : "");
                 if (!uiHydrated)
@@ -111,7 +124,7 @@ public sealed partial class Plugin
                     uiSettings = !HasKey(uiProvider) || string.IsNullOrEmpty(uiModel);
                     uiHydrated = true;
                 }
-            }, message => { if (!uiBusy) uiError = message; }, 8);
+            }, message => { if (!uiBusy) { lastStatusError = message; uiError = message; } }, 8);
         }
         finally { uiPolling = false; nextUiPoll = Time.realtimeSinceStartup + 2; }
     }
@@ -221,6 +234,7 @@ public sealed partial class Plugin
     private void StopFromPanel()
     {
         ++uiOperation;
+        chatQueue.Clear();
         DisableControl("Помощник остановлен. Управление возвращено вам.");
         uiClient?.Dispose();
         CreateUiClient();
@@ -314,7 +328,7 @@ public sealed partial class Plugin
         if (GUILayout.Button("Лидер: " + (leader ? leader!.GetPlayerName() : "не выбран") + " · сменить", panelButtonStyle)) SelectNextLeader();
         allowCombat.Value = GUILayout.Toggle(allowCombat.Value, "Разрешить бой и защиту лидера");
         autoSurvival.Value = GUILayout.Toggle(autoSurvival.Value, "Автоматически есть доступную еду");
-        allowChat.Value = GUILayout.Toggle(allowChat.Value, "Принимать !ai команды из чата выбранного лидера");
+        allowChat.Value = GUILayout.Toggle(allowChat.Value, "Слушать обращения лидера в обычном чате");
         GUILayout.Space(12);
         GUILayout.Label("Что нужно сделать?", statusStyle);
         uiObjective = GUILayout.TextArea(uiObjective, 1000, GUILayout.Height(70));
@@ -330,7 +344,7 @@ public sealed partial class Plugin
         string connection = uiModel.Length > 0 ? (uiProvider == "gemini" ? "Gemini" : "OpenAI") + " · " + uiModel : "Нейросеть не подключена";
         if (GUILayout.Button((uiSettings ? "▼ " : "▶ ") + "Подключение: " + connection, panelButtonStyle)) uiSettings = !uiSettings;
         if (uiSettings) DrawConnectionSettings();
-        GUILayout.Label("Чат лидера: !ai следуй · !ai стоп · !ai статус · !ai <задача>", hintStyle);
+        GUILayout.Label("Обратитесь по имени персонажа: «Бъерн, подбери камни». Продолжения без имени AI понимает по контексту.", hintStyle);
         }
         GUILayout.Space(10);
         if (GUILayout.Button("Назад в меню", panelButtonStyle))

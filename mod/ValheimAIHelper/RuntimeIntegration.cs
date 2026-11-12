@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using BepInEx;
+using UnityEngine;
 
 namespace ValheimAIHelper;
 
@@ -12,11 +13,13 @@ public sealed partial class Plugin
     private bool runtimeFailed;
     private string lastMotor = "", eventInstance = "";
     private int lastEventId;
+    private float nextMenuProbe;
+    private string menuProbeError = "";
 
     private void InitRuntime()
     {
         journal.RegisterSecret(bridgeToken.Value);
-        AddLog("version", "Valheim AI Helper 0.3.1; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
+        AddLog("version", "Valheim AI Helper 0.4.0; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
         if (!autoBridge.Value) { AddLog("service", "Автозапуск выключен в конфигурации; используется внешний мост."); return; }
         StartLocalRuntime();
     }
@@ -37,6 +40,16 @@ public sealed partial class Plugin
     }
     private void UpdateRuntime()
     {
+        if (Time.realtimeSinceStartup >= nextMenuProbe && Menu.instance)
+        {
+            nextMenuProbe = Time.realtimeSinceStartup + 1;
+            try { InstallMenuEntry(Menu.instance); }
+            catch (Exception ex)
+            {
+                string error = ex.GetType().Name + ": " + ex.Message;
+                if (error != menuProbeError) { menuProbeError = error; AddLog("menu", error + "; " + GameUi.Describe(Menu.instance)); }
+            }
+        }
         if (runtime != null && !runtimeFailed && !runtime.Running)
         {
             runtimeFailed = true;
@@ -59,9 +72,13 @@ public sealed partial class Plugin
         var events = value.events;
         if (events == null) return;
         for (int i = events.Length - 1; i >= 0; --i)
-            if (events[i].id > lastEventId) { AddLog(events[i].source, events[i].message); lastEventId = events[i].id; }
+            if (events[i].id > lastEventId)
+            {
+                AddLog(events[i].source, events[i].message); lastEventId = events[i].id;
+                if (events[i].source == "assistant" && allowChat.Value && FindLeader()) ChatReply(events[i].message);
+            }
     }
-    private string Report() => journal.Redact("Valheim AI Helper 0.3.1\nValheim: " + global::Version.GetVersionString() +
+    private string Report() => journal.Redact("Valheim AI Helper 0.4.0\nValheim: " + global::Version.GetVersionString() +
         "\nMode: " + (active ? bridgeStatus?.mode ?? "connecting" : "manual") + "\nLeader: " + leaderName.Value +
         "\nAI: " + uiProvider + " / " + uiModel + "\nCombat: " + allowCombat.Value + "; survival: " + autoSurvival.Value +
         "\nStatus: " + status + "\nError: " + uiError + "\n\n" + journal.Text);

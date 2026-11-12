@@ -52,3 +52,13 @@ namespace ValheimAIHelper;
     [DataMember] public bool ok, key_present;
     [DataMember] public int revision;
 }
+[DataContract] public sealed class LeaderChatRequest
+{
+    [DataMember] public string actor_name = "", speaker = "", text = "";
+    [DataMember] public bool explicit_address;
+}
+[DataContract] public sealed class LeaderChatReply
+{
+    [DataMember] public bool handled, queued;
+    [DataMember] public string mode = "ignore", objective = "", reply = "";
+}

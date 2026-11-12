@@ -37,6 +37,7 @@ internal sealed class BridgeUiClient : IDisposable
                     BridgeCommand c => WireJson.Serialize(c),
                     ModelListRequest m => WireJson.Serialize(m),
                     ModelCheckRequest c => WireJson.Serialize(c),
+                    LeaderChatRequest c => WireJson.Serialize(c),
                     _ => throw new ArgumentException("Unsupported bridge request")
                 };
                 request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));

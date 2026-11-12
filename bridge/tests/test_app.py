@@ -104,7 +104,7 @@ async def test_host_origin_and_body_limits(clients):
     assert (await c.get("/", headers={"Host": "attacker.example"})).status_code == 400
     assert (await c.post("/api/command", headers={**AUTH, "Origin": "https://attacker.example"}, json={"mode": "stop"})).status_code == 403
     assert (await c.get("/", headers={"Sec-Fetch-Site": "cross-site"})).status_code == 403
-    assert (await c.post("/api/command", headers=AUTH, content="x" * 65537)).status_code == 413
+    assert (await c.post("/api/command", headers=AUTH, content="x" * 131073)).status_code == 413
 
 
 async def test_invalid_settings_never_echo_secret(clients):
