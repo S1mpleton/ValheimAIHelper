@@ -152,12 +152,20 @@ async def main():
                 decision=await client.post("/api/decision",json={**extended,"sequence":seq+1})
                 assert subprocess.check_output(["dotnet",str(program),decoder,str(seq+1)],input=decision.content,timeout=10).strip()==expected,decision.text
                 await app.state.bridge.planner.close()
+            dialogue=await client.get("/api/dialogue")
+            assert subprocess.check_output(["dotnet",str(program),"--read-dialogue-index"],input=dialogue.content,timeout=10).strip()==b"DIALOGUE_INDEX_OK"
+            id=dialogue.json()["entries"][0]["id"]
+            page=await client.get(f"/api/dialogue/{id}?part=response")
+            assert subprocess.check_output(["dotnet",str(program),"--read-dialogue-page"],input=page.content,timeout=10).strip()==b"DIALOGUE_PAGE_OK"
+            exported=await client.get(f"/api/dialogue/{id}/export")
+            assert subprocess.check_output(["dotnet",str(program),"--read-dialogue-export"],input=exported.content,timeout=10).strip()==b"DIALOGUE_EXPORT_OK"
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
     print("PASS: background plan -> destination/run/plan ID -> C# policy")
     print("PASS: all action names match; actual C# extended snapshot -> quantity drop decision -> C# policy; ordinary chat DTO")
     print("PASS: native Ollama settings/status DTOs -> local model list/check/JSON plan -> C# quantity policy; thinking disabled")
     print("PASS: C# loaded ground stack (45m/count=7) -> local pickup plan; give exactly 5 from observed inventory to player -> C# validation")
+    print("PASS: actual model request/raw reply/validation dialogue -> paged Python endpoints -> C# index/page/export DTOs")
 
 
 if __name__ == "__main__":

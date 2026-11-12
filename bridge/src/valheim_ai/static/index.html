@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.6.0</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.6.1</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
   <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
@@ -49,6 +49,18 @@
       </section>
     </div>
     <section class="world"><h2>Персонаж</h2><p id="bridge-error" role="alert" hidden></p><p id="actor">Ждём наблюдение из игры…</p><p id="performance" aria-live="polite">Скорость AI появится после первого запроса.</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают. Закройте панель F8, чтобы разрешить движение.</p></section>
+    <section>
+      <details id="dialogue-open"><summary>Диалог AI — отправленные запросы и ответы</summary>
+        <p class="hint">Последние 8 запросов хранятся в памяти службы. Ответ появляется после завершения генерации. Ключи скрыты; поля размышлений не записываются.</p>
+        <div class="row"><select id="dialogue-choice" aria-label="Запрос к AI"></select><button id="dialogue-latest" type="button" class="secondary">Последний</button></div>
+        <p id="dialogue-info" class="hint">Диалогов пока нет. Включите AI или проверьте модель.</p>
+        <div class="row"><button id="dialogue-request" type="button" class="secondary">Запрос</button><button id="dialogue-response" type="button" class="secondary">Ответ AI</button><button id="dialogue-result" type="button" class="secondary">Проверка</button></div>
+        <pre id="dialogue-text" tabindex="0"></pre>
+        <div class="row"><button id="dialogue-prev" type="button" class="secondary">‹ Страница</button><span id="dialogue-page">1/1</span><button id="dialogue-next" type="button" class="secondary">Страница ›</button></div>
+        <div class="row"><button id="dialogue-copy" type="button" class="secondary">Копировать всё</button><button id="dialogue-save" type="button" class="secondary">Сохранить всё</button><button id="dialogue-clear" type="button" class="secondary">Очистить диалоги</button></div>
+        <p class="hint">Проверка показывает принятый план или причину отказа. Фактическое выполнение видно в игровом журнале и следующем снимке мира.</p>
+      </details>
+    </section>
     <section><h2>Последние решения</h2><p class="hint">Планы, результаты действий и ошибки. Короткие ответы помощника могут появляться в игровом чате.</p><ol id="events" aria-live="polite"></ol></section>
   </div>
   <footer>Провайдеры: локальная Ollama, OpenAI и Gemini. Управление, подключения и журнал также доступны прямо в игровом меню. F9 — немедленный стоп.</footer>

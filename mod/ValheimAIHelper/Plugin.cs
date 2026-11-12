@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.6.0")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.6.1")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {

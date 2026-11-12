@@ -84,6 +84,7 @@ async function refresh() {
       return li;
     }));
     keyStatus();
+    if ($("dialogue-open").open) await refreshDialogue();
   } catch (e) { notice(e.message || "Мост недоступен", true); }
   finally { polling = false; }
 }
@@ -105,6 +106,76 @@ $("pair-form").addEventListener("submit", async e => {
     notice("Мост подключён. Включите мод на отдельном персонаже через F8, затем выберите режим здесь.");
     await refresh();
   } catch (error) { notice(error.message, true); }
+});
+
+let dialogueRecords = [], dialogueId = 0, dialoguePage = 0, dialoguePages = 1, dialoguePart = "request";
+let dialoguePolling = false, dialogueBusy = false, dialogueLatest = true, dialogueEpoch = 0, dialogueInstance = "";
+function dialogueNavigate() { dialogueEpoch++; refreshDialogue(); }
+async function refreshDialogue() {
+  if (!bridgeToken || dialoguePolling || dialogueBusy || !$("dialogue-open").open) return;
+  dialoguePolling = true;
+  const epoch = dialogueEpoch;
+  try {
+    const index = await api("/api/dialogue");
+    if (epoch !== dialogueEpoch) return;
+    if (dialogueInstance !== index.instance_id) { dialogueInstance = index.instance_id; dialogueId = 0; dialogueLatest = true; dialoguePage = 0; }
+    dialogueRecords = index.entries;
+    const chosen = dialogueLatest || !dialogueRecords.some(r => r.id === dialogueId) ? dialogueRecords[0]?.id || 0 : dialogueId;
+    if (chosen !== dialogueId) { dialogueId = chosen; dialoguePage = 0; }
+    $("dialogue-choice").replaceChildren(...dialogueRecords.map(r => {
+      const option = document.createElement("option"); option.value = r.id;
+      option.textContent = `#${r.id} · ${r.time} · ${r.provider}/${r.model} · ${r.status}`; return option;
+    }));
+    $("dialogue-choice").value = String(dialogueId);
+    const record = dialogueRecords.find(r => r.id === dialogueId);
+    $("dialogue-copy").disabled = $("dialogue-save").disabled = !record || record.status === "running";
+    $("dialogue-info").textContent = record ? `${{check:"Проверка модели",chat:"Разбор чата",plan:"Игровой план"}[record.purpose] || "Запрос"} · ${record.status === "running" ? "Ожидание" : record.status === "ok" ? "План проверен" : record.status === "cancelled" ? "Отменён" : "Ошибка"} · ${record.seconds.toFixed(1)} с${record.truncated ? " · текст сокращён" : ""}` : "Диалогов пока нет. Включите AI или проверьте модель.";
+    if (!record) { $("dialogue-text").textContent = ""; return; }
+    const detail = await api(`/api/dialogue/${dialogueId}?part=${dialoguePart}&page=${dialoguePage}`);
+    if (epoch !== dialogueEpoch) return;
+    dialoguePage = detail.page; dialoguePages = detail.pages;
+    $("dialogue-text").textContent = detail.text;
+    $("dialogue-page").textContent = `${dialoguePage + 1}/${dialoguePages}`;
+    $("dialogue-prev").disabled = dialoguePage === 0; $("dialogue-next").disabled = dialoguePage + 1 >= dialoguePages;
+    for (const part of ["request", "response", "result"]) {
+      const button = $("dialogue-" + part); button.setAttribute("aria-pressed", part === dialoguePart ? "true" : "false");
+      button.textContent = (part === dialoguePart ? "● " : "") + {request:"Запрос",response:"Ответ AI",result:"Проверка"}[part];
+    }
+  } catch (error) { if (epoch === dialogueEpoch) $("dialogue-text").textContent = error.message; }
+  finally { dialoguePolling = false; if (epoch !== dialogueEpoch) refreshDialogue(); }
+}
+$("dialogue-open").addEventListener("toggle", () => { if ($("dialogue-open").open) refreshDialogue(); });
+$("dialogue-choice").addEventListener("change", () => { dialogueId = Number($("dialogue-choice").value); dialogueLatest = false; dialoguePage = 0; dialogueNavigate(); });
+$("dialogue-latest").addEventListener("click", () => { dialogueLatest = true; dialoguePage = 0; dialogueNavigate(); });
+for (const part of ["request", "response", "result"]) $("dialogue-" + part).addEventListener("click", () => { dialogueLatest = false; dialoguePart = part; dialoguePage = 0; dialogueNavigate(); });
+$("dialogue-prev").addEventListener("click", () => { dialogueLatest = false; dialoguePage = Math.max(0, dialoguePage - 1); dialogueNavigate(); });
+$("dialogue-next").addEventListener("click", () => { dialogueLatest = false; dialoguePage = Math.min(dialoguePages - 1, dialoguePage + 1); dialogueNavigate(); });
+async function exportDialogue(save) {
+  if (!dialogueId || dialogueBusy) return;
+  dialogueBusy = true; const id = dialogueId;
+  $("dialogue-copy").disabled = $("dialogue-save").disabled = true;
+  try {
+    let offset = 0, text = "", done = false;
+    for (let i = 0; i < 64; i++) {
+      const part = await api(`/api/dialogue/${id}/export?offset=${offset}`);
+      if (part.id !== id || part.offset !== offset || part.next_offset <= offset) throw new Error("Несогласованные части диалога");
+      text += part.text; offset = part.next_offset;
+      if (part.complete) { done = true; break; }
+    }
+    if (!done) throw new Error("Превышен лимит экспорта диалога");
+    if (save) {
+      const url = URL.createObjectURL(new Blob([text], {type:"text/plain;charset=utf-8"}));
+      const link = document.createElement("a"); link.href = url; link.download = `AI-Dialogue-${id}.txt`; link.click(); URL.revokeObjectURL(url);
+    } else await navigator.clipboard.writeText(text);
+    notice(save ? "Диалог сохранён." : "Полный диалог скопирован.");
+  } catch (error) { notice(error.message, true); }
+  finally { dialogueBusy = false; refreshDialogue(); }
+}
+$("dialogue-copy").addEventListener("click", () => exportDialogue(false));
+$("dialogue-save").addEventListener("click", () => exportDialogue(true));
+$("dialogue-clear").addEventListener("click", async () => {
+  try { await api("/api/dialogue/clear", {}); dialogueId = dialoguePage = 0; dialogueLatest = true; dialogueNavigate(); }
+  catch (error) { notice(error.message, true); }
 });
 $("provider").addEventListener("change", async () => {
   const p = $("provider").value;

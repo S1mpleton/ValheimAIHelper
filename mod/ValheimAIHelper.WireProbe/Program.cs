@@ -30,6 +30,24 @@ if (args.Length > 0 && args[0] == "--read-ollama-status")
     if (state.provider!="ollama" || !state.provider_ready || state.model!="wire-agent:Q4") return 1;
     Console.WriteLine("OLLAMA_STATUS_OK"); return 0;
 }
+if (args.Length > 0 && args[0] == "--read-dialogue-index")
+{
+    var index=WireJson.Deserialize<DialogueIndex>(Console.In.ReadToEnd());
+    if(index.entries.Length==0||index.entries[0].provider!="ollama"||index.entries[0].status!="ok")return 1;
+    Console.WriteLine("DIALOGUE_INDEX_OK");return 0;
+}
+if (args.Length > 0 && args[0] == "--read-dialogue-page")
+{
+    var page=WireJson.Deserialize<DialoguePage>(Console.In.ReadToEnd());
+    if(page.part!="response"||!page.text.Contains("pickup")||page.pages<1)return 1;
+    Console.WriteLine("DIALOGUE_PAGE_OK");return 0;
+}
+if (args.Length > 0 && args[0] == "--read-dialogue-export")
+{
+    var chunk=WireJson.Deserialize<DialogueExport>(Console.In.ReadToEnd());
+    if(chunk.offset!=0||chunk.next_offset<1||!chunk.text.Contains("Valheim AI Helper"))return 1;
+    Console.WriteLine("DIALOGUE_EXPORT_OK");return 0;
+}
 if (args.Length > 0 && args[0] == "--ollama-ui-timeout")
 { Console.WriteLine(AiProviders.UiTimeout("ollama")); return 0; }
 if (args.Length > 0 && args[0] == "--ui-chat")

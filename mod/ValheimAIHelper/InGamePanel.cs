@@ -92,6 +92,7 @@ public sealed partial class Plugin
 
     private void UpdatePanel()
     {
+        UpdateDialogue();
         if (uiError != loggedUiError) { loggedUiError = uiError; if (uiError.Length > 0) AddLog("error", uiError); }
         try { nativeWindow?.Refresh(); }
         catch (Exception ex) { nativeWindow?.Dispose(); AddLog("ui", "Ошибка игрового окна: " + ex.GetType().Name + ". Используется резервная панель."); }
@@ -335,12 +336,14 @@ public sealed partial class Plugin
         if (uiError.Length > 0) GUILayout.Label(uiError, panelErrorStyle);
         else if (uiMessage.Length > 0) GUILayout.Label(uiMessage, statusStyle);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button((!uiSettings && !uiJournal ? "● " : "") + "Персонаж", panelButtonStyle)) { uiSettings = uiJournal = false; }
-        if (GUILayout.Button((uiSettings ? "● " : "") + "Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = false; }
-        if (GUILayout.Button((uiJournal ? "● " : "") + "Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = false; }
+        if (GUILayout.Button((!uiSettings && !uiJournal ? "● " : "") + "Персонаж", panelButtonStyle)) { uiSettings = uiJournal = uiDialogue = false; }
+        if (GUILayout.Button((uiSettings ? "● " : "") + "Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = uiDialogue = false; }
+        if (GUILayout.Button((uiJournal ? "● " : "") + "Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = uiDialogue = false; }
         GUILayout.EndHorizontal();
-        if (uiJournal)
+        if (uiJournal && uiDialogue) DrawDialogue();
+        else if (uiJournal)
         {
+            if (GUILayout.Button("Диалог AI — запросы и ответы", panelButtonStyle)) { uiDialogue = true; nextDialoguePoll = 0; }
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Копировать отчёт", panelButtonStyle)) CopyReport();
             if (GUILayout.Button("Сохранить", panelButtonStyle)) SaveReport();

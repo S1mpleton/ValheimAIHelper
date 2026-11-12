@@ -14,7 +14,7 @@ public sealed partial class Plugin
     private sealed class NativeControlWindow : IDisposable
     {
         private readonly Plugin p;
-        private GameObject? root, frame, characterMain, characterAdvanced;
+        private GameObject? root, frame, characterMain, characterAdvanced, journalMain, dialoguePanel;
         private Component? textTemplate, canvas;
         private readonly List<GameObject> pages = new();
         private readonly List<Component> busyButtons = new();
@@ -22,6 +22,8 @@ public sealed partial class Plugin
         private readonly List<GameObject> tabMarkers = new();
         private Component? stateLabel, messageLabel, leaderLabel, combatButton, foodButton, controlButton, logText;
         private Component? keyInput, modelInput, intervalInput, providerButton, keyStatusLabel, credentialLabel, usageLabel, performanceLabel;
+        private Component? dialogueHeader, dialogueBody, dialoguePageLabel, dialogueCopy, dialogueSave;
+        private readonly List<Component> dialogueTabs = new();
         private readonly List<Component> modelButtons = new();
         private int page, modelPage, logPage;
         private float nextRefresh;
@@ -162,7 +164,7 @@ public sealed partial class Plugin
         {
             try { if (!Ready) Build(); }
             catch { Dispose(); throw; }
-            root!.SetActive(true); page = 0; ShowPage(); Refresh(true);
+            root!.SetActive(true); page = 0; p.uiDialogue = false; ShowPage(); Refresh(true);
         }
         public void SetVisible(bool visible) { if (root) root!.SetActive(visible); }
         private void Build()
@@ -193,7 +195,7 @@ public sealed partial class Plugin
             for (int i = 0; i < names.Length; i++)
             {
                 int index = i;
-                tabs.Add(Button(strip.transform, names[i], i * 274, 4, 264, () => { page = index; ShowPage(); }));
+                tabs.Add(Button(strip.transform, names[i], i * 274, 4, 264, () => { page = index; p.uiDialogue = false; ShowPage(); }));
                 var marker = Box("Selected tab", strip.transform, i * 274, 44, 264, 3);
                 Image(marker, new Color(.85f, .59f, .18f), false); tabMarkers.Add(marker);
                 pages.Add(Box("Tab " + i, frame.transform, 24, 166, 812, 382));
@@ -250,6 +252,10 @@ public sealed partial class Plugin
         }
         private void BuildJournal(Transform tab)
         {
+            journalMain = Box("Journal", tab, 0, 0, 812, 382);
+            dialoguePanel = Box("Agent dialogue", tab, 0, 0, 812, 382);
+            BuildDialogue(dialoguePanel.transform);
+            tab = journalMain.transform;
             performanceLabel = Label(tab, "", 0, 0, 812, 66, 15);
             logText = Label(tab, "", 0, 74, 812, 210, 14);
             Button(tab, "Копировать отчёт", 0, 296, 260, p.CopyReport);
@@ -257,7 +263,31 @@ public sealed partial class Plugin
             Button(tab, "Очистить", 552, 296, 260, () => { p.journal.Clear(); logPage = 0; });
             Button(tab, "Ранее", 0, 343, 155, () => logPage++);
             Button(tab, "Новые", 166, 343, 155, () => logPage = Math.Max(0, logPage - 1));
+            Button(tab, "Диалог AI", 332, 343, 204, () => { p.uiDialogue = true; p.nextDialoguePoll = 0; ShowPage(); });
             Button(tab, "Перезапустить службу", 552, 343, 260, () => { p.StopFromPanel(); p.StartLocalRuntime(); });
+        }
+        private void BuildDialogue(Transform tab)
+        {
+            Button(tab, "‹ Журнал", 0, 0, 150, () => { p.uiDialogue = false; ShowPage(); });
+            Label(tab, "Диалог AI · запросы, ответы и проверка", 168, 5, 644, 29, 18);
+            Button(tab, "Ранее", 0, 44, 110, () => p.NavigateDialogue(1));
+            Button(tab, "Новее", 120, 44, 110, () => p.NavigateDialogue(-1));
+            dialogueHeader = Label(tab, "", 244, 44, 568, 42, 13);
+            string[] parts = { "request", "response", "result" }, names = { "Запрос", "Ответ AI", "Проверка" };
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string part = parts[i];
+                dialogueTabs.Add(Button(tab, names[i], i * 274, 92, 264, () => p.SelectDialoguePart(part)));
+            }
+            dialogueBody = InputField(tab, "", 0, 136, 812, 204, 8000, _ => { }, multiline: true);
+            Set(dialogueBody, "readOnly", true);
+            if (Get(dialogueBody, "textComponent") is Component content) Set(content, "fontSize", 13f);
+            Button(tab, "‹ Страница", 0, 346, 110, () => p.ChangeDialoguePage(-1));
+            Button(tab, "Страница ›", 120, 346, 110, () => p.ChangeDialoguePage(1));
+            dialoguePageLabel = Label(tab, "", 244, 355, 100, 24, 14);
+            dialogueCopy = Button(tab, "Копировать всё", 354, 346, 145, () => p.StartCoroutine(p.ExportDialogue(false)));
+            dialogueSave = Button(tab, "Сохранить всё", 509, 346, 145, () => p.StartCoroutine(p.ExportDialogue(true)));
+            Button(tab, "Очистить", 668, 346, 144, () => p.StartCoroutine(p.ClearDialogue()));
         }
         private void ShowPage()
         {
@@ -269,6 +299,7 @@ public sealed partial class Plugin
                     Set(caption, "color", i == page ? new Color(1, .77f, .35f) : new Color(.77f, .74f, .65f));
             }
             characterMain!.SetActive(!additional); characterAdvanced!.SetActive(additional);
+            journalMain!.SetActive(!p.uiDialogue); dialoguePanel!.SetActive(p.uiDialogue);
             Refresh(true);
         }
         public void Refresh(bool force = false)
@@ -291,6 +322,17 @@ public sealed partial class Plugin
             Set(credentialLabel!, "text", p.uiProvider == "ollama" ? "Адрес Ollama на этом ПК (API-ключ не нужен)" : "API-ключ (только в памяти до закрытия игры)");
             Set(usageLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance));
             Set(performanceLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance) + "\n" + AiPerformanceText.Details(p.bridgeStatus?.performance));
+            Set(dialogueHeader!, "text", p.DialogueTitle);
+            if ((Get(dialogueBody!, "text") as string) != p.dialogueText)
+            {
+                var update = dialogueBody!.GetType().GetMethod("SetTextWithoutNotify", new[] { typeof(string) });
+                if (update != null) update.Invoke(dialogueBody, new object[] { p.dialogueText }); else Set(dialogueBody, "text", p.dialogueText);
+            }
+            Set(dialoguePageLabel!, "text", (p.dialoguePage + 1) + "/" + p.dialoguePages);
+            bool canExport = !p.dialogueBusy && p.CurrentDialogue != null && p.CurrentDialogue.status != "running";
+            Set(dialogueCopy!, "interactable", canExport); Set(dialogueSave!, "interactable", canExport);
+            for (int i = 0; i < dialogueTabs.Count; i++)
+                Set(dialogueTabs[i].GetComponent(Type("UnityEngine.UI.Image")), "color", p.dialoguePart == new[] { "request", "response", "result" }[i] ? new Color(.42f, .31f, .13f) : new Color(.12f, .10f, .07f));
             Set(keyStatusLabel!, "text", p.uiProvider == "ollama" ? "Локальная модель · API-ключ не нужен" : p.HasKey(p.uiProvider) ? "API-ключ уже задан в памяти службы" : "Введите API-ключ и сохраните подключение");
             EnumValue(keyInput!, "contentType", p.uiProvider == "ollama" ? "Standard" : "Password");
             foreach (var button in busyButtons) Set(button, "interactable", !p.uiBusy);
@@ -312,8 +354,8 @@ public sealed partial class Plugin
         {
             built = false;
             if (root) UnityEngine.Object.Destroy(root);
-            root = frame = characterMain = characterAdvanced = null; canvas = null;
-            pages.Clear(); busyButtons.Clear(); modelButtons.Clear(); tabs.Clear(); tabMarkers.Clear();
+            root = frame = characterMain = characterAdvanced = journalMain = dialoguePanel = null; canvas = null;
+            pages.Clear(); busyButtons.Clear(); modelButtons.Clear(); tabs.Clear(); tabMarkers.Clear(); dialogueTabs.Clear();
         }
     }
 }

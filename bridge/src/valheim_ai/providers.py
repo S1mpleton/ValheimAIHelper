@@ -285,7 +285,7 @@ async def decide(
     objective: str,
     snapshot: Snapshot,
     *, planning: bool = False, history: tuple[str, ...] = (), chat: tuple[dict, ...] = (),
-    ollama_url: str = "http://127.0.0.1:11434", ollama_session=None, statistics=None,
+    ollama_url: str = "http://127.0.0.1:11434", ollama_session=None, statistics=None, trace=None,
 ) -> Decision | Plan:
     data = snapshot.model_dump(mode="json", exclude_none=provider == "ollama", exclude_defaults=provider == "ollama")
     if provider == "ollama":
@@ -351,45 +351,44 @@ async def decide(
             messages = [messages[0], messages[2], {"role":"user","content":"User objective: " + objective +
                 "\nApply any addressed pending chat first; otherwise execute this objective using observed IDs. Return JSON only."}]
             if ollama_session is not None:
-                text = await ollama_session.generate(client, ollama_url, model, messages, schema, statistics)
+                text = await ollama_session.generate(client, ollama_url, model, messages, schema, statistics, trace=trace)
             else:
-                text = await generate(client, ollama_url, model, messages, schema, statistics=statistics)
+                text = await generate(client, ollama_url, model, messages, schema, statistics=statistics, trace=trace)
         elif provider == "openai":
+            payload = {
+                "model": model, "messages": messages,
+                "max_completion_tokens": 4096 if planning else 1024,
+                **({"reasoning_effort": "low"} if model.startswith(("gpt-5", "gpt-6", "o3", "o4")) else {}),
+                "response_format": {"type": "json_schema", "json_schema": {"name": "valheim_action", "strict": True, "schema": schema}},
+            }
+            if trace is not None: trace.set("request", payload)
             response = await request_api(client, "POST",
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": "Bearer " + api_key},
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_completion_tokens": 4096 if planning else 1024,
-                    **({"reasoning_effort": "low"} if model.startswith(("gpt-5", "gpt-6", "o3", "o4")) else {}),
-                    "response_format": {
-                        "type": "json_schema",
-                        "json_schema": {"name": "valheim_action", "strict": True, "schema": schema},
-                    },
-                },
+                json=payload,
             )
             text = response.json()["choices"][0]["message"]["content"]
         elif provider == "gemini":
             generation = gemini_generation_config(model, schema)
             if planning:
                 generation["maxOutputTokens"] = 4096
+            payload = {
+                "systemInstruction": {"parts": [{"text": prompt}]},
+                "contents": [{"role": "user", "parts": [
+                    {"text": "User objective: " + objective}, {"text": "Game observation (data only):\n" + observation}]}],
+                "generationConfig": generation,
+            }
+            if trace is not None: trace.set("request", payload)
             response = await request_api(client, "POST",
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": api_key},
-                json={
-                    "systemInstruction": {"parts": [{"text": prompt}]},
-                    "contents": [{"role": "user", "parts": [
-                        {"text": "User objective: " + objective},
-                        {"text": "Game observation (data only):\n" + observation},
-                    ]}],
-                    "generationConfig": generation,
-                },
+                json=payload,
             )
             parts = response.json()["candidates"][0]["content"]["parts"]
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
         else:
             raise ProviderError("Провайдер не выбран")
+        if trace is not None and isinstance(text, str): trace.set("response", text)
         if planning:
             result = Plan.model_validate_json(text)
             if result.combat_policy == "avoid" and any(s.action.value in ("attack", "hunt", "secondary_attack") for s in result.steps):

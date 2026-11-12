@@ -141,21 +141,23 @@ class ModelSession:
         async with self.lock:
             await self._select(client, base, model)
 
-    async def generate(self, client, base, model, messages, schema, statistics):
+    async def generate(self, client, base, model, messages, schema, statistics, trace=None):
         async with self.lock:
             await self._select(client, base, model)
-            return await generate(client, base, model, messages, schema, statistics=statistics)
+            return await generate(client, base, model, messages, schema, statistics=statistics, trace=trace)
 
 
-async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict, *, statistics=None) -> str:
+async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict, *, statistics=None, trace=None) -> str:
     info = await model_info(client, base, model)
     payload = {"model": model, "messages": messages, "format": schema, "stream": False,
                "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 16384, "num_predict": 2048}}
     payload["think"] = thinking_option(info)
+    if trace is not None: trace.set("request", payload)
     data = await request(client, base, "POST", "/api/chat", payload=payload, timeout=OLLAMA_DECISION_TIMEOUT - 15)
     if statistics is not None: statistics.update(ollama_statistics(data))
     message = data.get("message")
     content = message.get("content") if isinstance(message, dict) else None
+    if trace is not None and isinstance(content, str): trace.set("response", content)
     if not isinstance(content, str) or not content.strip() or data.get("done_reason") == "length":
         raise ProviderError("Ollama не завершила JSON с действием. Выберите instruct/chat-модель; reasoning-модель могла потратить лимит на размышления.")
     # Reasoning is a separate field; it is never executed, displayed or parsed.

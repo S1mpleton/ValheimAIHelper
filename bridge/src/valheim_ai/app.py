@@ -8,7 +8,7 @@ import secrets
 import time
 import re
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, SecretStr, model_validator
@@ -21,6 +21,7 @@ from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFoun
                         API_TIMEOUT, DECISION_TIMEOUT, OLLAMA_DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .ollama import DEFAULT_URL, ModelSession, local_url, valid_model, list_models as list_ollama_models
 from .performance import Performance
+from .dialogue import Dialogue, PART_LIMIT
 from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
@@ -110,6 +111,7 @@ class State:
         self.explicit_chat_mission = None
         self.explicit_chat_id = 0
         self.inference_tasks = set()
+        self.dialogue = Dialogue(lambda: [self.token, *self.keys.values()])
 
     @property
     def ready(self):
@@ -132,17 +134,26 @@ class State:
         task = asyncio.current_task()
         self.inference_tasks.add(task)
         record = self.performance.begin(provider, model, purpose)
+        trace = self.dialogue.begin(provider, model, purpose, key)
         outcome = "error"
+        trace_result = "Запрос не завершён."
         try:
             result = await decide(self.client_for(provider), provider, model, key, objective, snapshot,
                 ollama_url=base or self.ollama_url, ollama_session=self.ollama_session,
-                statistics=record, **kwargs)
+                statistics=record, trace=trace, **kwargs)
             outcome = "ok"
+            trace_result = "Проверка плана: OK. Это ещё не подтверждение применения или исполнения игрой. Устаревший план может быть отброшен.\n" + result.model_dump_json(indent=2)
             return result
+        except Exception as exc:
+            trace_result = str(exc) if isinstance(exc, ProviderError) else "Ошибка обработки ответа: " + type(exc).__name__
+            if isinstance(exc, ProviderError) and exc.diagnostic: trace_result += "\nОтвет API:\n" + exc.diagnostic
+            raise
         except asyncio.CancelledError:
             outcome = "cancelled"
+            trace_result = "Запрос отменён. Ответ не используется для управления."
             raise
         finally:
+            trace.finish(outcome, trace_result)
             self.inference_tasks.discard(task)
             self.performance.finish(record, outcome)
             if outcome != "cancelled" and "request_seconds" in record:
@@ -329,6 +340,31 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "performance": state.performance.snapshot(),
         }
 
+    @app.get("/api/dialogue", dependencies=[Depends(authenticate)])
+    async def dialogue_index():
+        return {"instance_id": state.instance_id, **state.dialogue.index()}
+
+    @app.post("/api/dialogue/clear", dependencies=[Depends(authenticate)])
+    async def clear_dialogue():
+        state.dialogue.clear()
+        return {"ok": True}
+
+    def exchange(id):
+        record = state.dialogue.records.get(id)
+        if record is None: raise HTTPException(404, "Диалог уже удалён из памяти. Обновите список.")
+        return record
+
+    @app.get("/api/dialogue/{id}", dependencies=[Depends(authenticate)])
+    async def dialogue_page(id: int, part: str = Query(default="request", pattern="^(request|response|result)$"),
+                            page: int = Query(default=0, ge=0, le=10000)):
+        return state.dialogue.page(exchange(id), part, page)
+
+    @app.get("/api/dialogue/{id}/export", dependencies=[Depends(authenticate)])
+    async def export_dialogue(id: int, offset: int = Query(default=0, ge=0, le=3 * PART_LIMIT + 10000)):
+        record = exchange(id)
+        if record.status == "running": raise HTTPException(409, "Дождитесь ответа или отмените запрос через F9 перед полным экспортом.")
+        return state.dialogue.export(record, offset)
+
     @app.post("/api/models/{provider}", dependencies=[Depends(authenticate)])
     async def models(provider: str, settings: ModelListRequest):
         if provider not in (*state.keys, "ollama"):
@@ -387,8 +423,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                     probe, planning=True, base=base, purpose="check")
                 return ["Ollama: локальная модель доступна", "JSON-план игровых действий: OK"]
             else:
-                await decide(state.client, provider, settings.model, key,
-                             "Проверка API. Верни wait, пустой target_id, duration=1 и короткое say.", probe)
+                await state.infer(provider, settings.model, key,
+                             "Проверка API. Верни wait, пустой target_id, duration=1 и короткое say.", probe, purpose="check")
                 return ["Формат действий: OK"]
         state.planner.interrupt_planning()
         state.cancel_chat()
@@ -529,7 +565,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 return await state.decide(
                     "Классифицируй обращение к помощнику по контексту. Текущий режим: " + state.command.mode +
                     "; задача: " + state.command.objective + ". Не управляй персонажем: steps=[wait].", probe,
-                    planning=True, chat=tuple({**m,"pending":m["id"]==line["id"]} for m in state.chat_history))
+                    planning=True, purpose="chat", chat=tuple({**m,"pending":m["id"]==line["id"]} for m in state.chat_history))
             chat_task = asyncio.create_task(classify())
             state.chat_task = chat_task
             result = await asyncio.wait_for(chat_task, state.decision_timeout)

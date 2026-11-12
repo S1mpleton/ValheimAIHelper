@@ -66,6 +66,31 @@ namespace ValheimAIHelper;
     [DataMember] public bool ok, key_present;
     [DataMember] public int revision;
 }
+[DataContract] public sealed class BridgeEmpty { }
+[DataContract] public sealed class DialogueIndex
+{
+    [DataMember] public string instance_id = "";
+    [DataMember] public int revision;
+    [DataMember] public DialogueEntry[] entries = Array.Empty<DialogueEntry>();
+}
+[DataContract] public sealed class DialogueEntry
+{
+    [DataMember] public int id;
+    [DataMember] public string time = "", provider = "", model = "", purpose = "", status = "";
+    [DataMember] public double seconds;
+    [DataMember] public bool truncated;
+}
+[DataContract] public sealed class DialoguePage
+{
+    [DataMember] public int id, page, pages;
+    [DataMember] public string part = "", text = "", status = "";
+}
+[DataContract] public sealed class DialogueExport
+{
+    [DataMember] public int id, offset, next_offset;
+    [DataMember] public string text = "";
+    [DataMember] public bool complete;
+}
 [DataContract] public sealed class LeaderChatRequest
 {
     [DataMember] public string actor_name = "", speaker = "", text = "";

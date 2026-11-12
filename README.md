@@ -2,7 +2,9 @@
 
 AI-напарник для Windows / Steam. Мод управляет обычным персонажем во втором клиенте Valheim. **Esc → Управление персонажем**, резервная клавиша **F8**, немедленный стоп **F9**.
 
-[Скачать Windows 0.6.0](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.6.0/ValheimAIHelper-windows-0.6.0.zip) · [Релиз и исходники](https://github.com/S1mpleton/ValheimAIHelper/releases/tag/v0.6.0) · [SHA256](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.6.0/ValheimAIHelper-windows-0.6.0.zip.sha256)
+**Журнал → Диалог AI** показывает отправленные запросы, исходные ответы и проверку планов. Есть страницы, копирование и сохранение полного обмена. [Как посмотреть диалог](docs/dialogue.md).
+
+[Скачать Windows 0.6.1](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.6.1/ValheimAIHelper-windows-0.6.1.zip) · [Релиз и исходники](https://github.com/S1mpleton/ValheimAIHelper/releases/tag/v0.6.1) · [SHA256](https://github.com/S1mpleton/ValheimAIHelper/releases/download/v0.6.1/ValheimAIHelper-windows-0.6.1.zip.sha256)
 
 Полный [каталог действий и сценарии проверки](docs/actions.md): подбор выпавших вещей, точный сброс и передача рядом с игроком. Скорость AI видна в меню «Персонаж» и «Журнал».
 

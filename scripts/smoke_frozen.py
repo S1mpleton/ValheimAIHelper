@@ -42,7 +42,7 @@ def main():
                     except OSError:
                         if time.monotonic() > deadline: raise
                         time.sleep(.2)
-                assert health["version"] == "0.6.0", health
+                assert health["version"] == "0.6.1", health
                 req = urllib.request.Request(base + "/api/status", headers={"Authorization": "Bearer " + token})
                 with opener.open(req) as r: status = json.load(r)
                 assert status["mode"] == "stop" and not status["keys_present"]["openai"]
@@ -83,6 +83,13 @@ def main():
                         assert post("/api/models/ollama",{})["models"]==["smoke-agent:local"]
                         assert post("/api/check/ollama",{"model":"smoke-agent:local"})["ok"]
                         assert requests==["/api/ps","/api/tags","/api/show","/api/chat"]
+                        def get(path):
+                            with opener.open(urllib.request.Request(base+path,headers={"Authorization":"Bearer "+token}),timeout=10) as r:return json.load(r)
+                        dialogue=get("/api/dialogue");id=dialogue["entries"][0]["id"]
+                        assert get(f"/api/dialogue/{id}?part=request")["part"]=="request"
+                        assert '"steps"' in get(f"/api/dialogue/{id}?part=response")["text"]
+                        assert "Valheim AI Helper" in get(f"/api/dialogue/{id}/export")["text"]
+                        assert post("/api/dialogue/clear",{})["ok"] and not get("/api/dialogue")["entries"]
                     finally:
                         server.shutdown();worker.join(timeout=3)
                 print("PASS: frozen runtime starts without Python/source in cwd; HTTP/auth/static/status/ordinary-chat")
