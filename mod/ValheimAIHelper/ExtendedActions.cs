@@ -14,6 +14,7 @@ internal sealed partial class ActionExecutor
     private Vector2i craftPosition;
     private bool placementPulse, placementDone;
     private string placementFailure = "";
+    private float pickupOwnershipStarted;
     public bool OwnsInventory => inventorySession.Owned;
     private void ResetExtended(Decision value)
     {
@@ -21,6 +22,7 @@ internal sealed partial class ActionExecutor
         actionStage = uses = craftsCompleted = 0; actionTime = Time.realtimeSinceStartup; nextUse = 0;
         placementPulse = placementDone = false; placementFailure = "";
         repairBefore = -1;
+        pickupOwnershipStarted = 0;
     }
     private bool ExtendedTick(Player player, Player? leader, bool combat)
     {
@@ -28,10 +30,18 @@ internal sealed partial class ActionExecutor
         switch (d.action)
         {
             case "drop":
-                if (!o.Items.TryGetValue(d.target_id, out var dropped) || !player.GetInventory().ContainsItem(dropped) || d.amount < 1 || d.amount > dropped.m_stack)
-                { Finish("Неверное количество или предмет уже отсутствует", false); return true; }
-                bool droppedOk = player.DropItem(player.GetInventory(), dropped, d.amount);
-                Finish(droppedOk ? "Выброшено: " + d.amount : "Игра запретила сброс предмета", droppedOk); return true;
+                DropInventoryItem(player, d.target_id); return true;
+            case "give":
+                if (!o.Characters.TryGetValue(d.target_id, out var recipient) || !(recipient is Player receiver) || !receiver || receiver==player || receiver.IsDead())
+                { Finish("Игрок-получатель не виден или недоступен", false); return true; }
+                if (!o.Items.TryGetValue(d.item_id, out var delivery) || !player.GetInventory().ContainsItem(delivery) || delivery.m_stack < d.amount)
+                { Finish("Не хватает предметов для передачи", false); return true; }
+                if (Vector3.Distance(player.transform.position,receiver.transform.position)>2.5f)
+                { actionStage=0;MoveTo(player,receiver.transform.position,2);if(ActionStatus=="success")ActionStatus="running";return true; }
+                if (actionStage==0) { actionStage=1;nextUse=Time.realtimeSinceStartup+.35f; }
+                Controls(Vector3.zero,receiver.transform.position-player.transform.position);
+                if (Time.realtimeSinceStartup>=nextUse) DropInventoryItem(player,d.item_id,"Рядом с " + Observation.Name(receiver.GetPlayerName()) + " оставлено");
+                return true;
             case "unequip":
                 if (!o.Items.TryGetValue(d.target_id, out var unequip) || !player.GetInventory().ContainsItem(unequip)) { Finish("Предмет отсутствует", false); return true; }
                 if (!unequip.m_equipped) { Finish("Предмет снят"); return true; }
@@ -83,6 +93,41 @@ internal sealed partial class ActionExecutor
                 return true;
             default: return false;
         }
+    }
+    private void PickupItem(Player player)
+    {
+        var d=decision!;
+        if(!observation!.Drops.TryGetValue(d.target_id,out var drop)||!drop)
+        { Finish("Выпавший предмет исчез или его уже забрал другой игрок",false);return; }
+        if(Vector3.Distance(player.transform.position,drop.transform.position)>2)
+        { MoveTo(player,drop.transform.position,1.5f,maxDistance:128);if(ActionStatus=="success")ActionStatus="running";return; }
+        var item=drop.m_itemData;var bag=player.GetInventory();
+        if(!drop.CanPickup(false))
+        {
+            if(pickupOwnershipStarted==0)pickupOwnershipStarted=Time.realtimeSinceStartup;
+            if(Time.realtimeSinceStartup>=nextUse) { NativeMethods.Call(drop,"RequestOwn");nextUse=Time.realtimeSinceStartup+1; }
+            if(Time.realtimeSinceStartup-pickupOwnershipStarted>6)Finish("Игра не предоставила владение выпавшим предметом для подбора",false);
+            else Result="Ожидаю разрешение игры на подбор предмета";
+            return;
+        }
+        if(!bag.CanAddItem(item)) { Finish("В инвентаре нет места для этой стопки",false);return; }
+        if(bag.GetTotalWeight()+item.GetWeight()>player.GetMaxCarryWeight()) { Finish("Подбор приведёт к перегрузке инвентаря",false);return; }
+        string name=item.m_shared.m_name;int quality=item.m_quality;
+        int before=bag.GetAllItems().Where(i=>i.m_shared.m_name==name&&i.m_quality==quality).Sum(i=>i.m_stack);
+        bool accepted=player.Pickup(drop.gameObject,false,false);
+        int added=bag.GetAllItems().Where(i=>i.m_shared.m_name==name&&i.m_quality==quality).Sum(i=>i.m_stack)-before;
+        Finish(added>0?"Подобрано: "+Observation.Name(name)+" ×"+added:accepted?"Игра ещё не подтвердила изменение инвентаря":"Игра отклонила подбор предмета",added>0);
+    }
+    private void DropInventoryItem(Player player,string id,string verb="Сброшено")
+    {
+        var d=decision!;var bag=player.GetInventory();
+        if(!observation!.Items.TryGetValue(id,out var item)||!bag.ContainsItem(item)||d.amount<1||d.amount>item.m_stack)
+        { Finish("Неверное количество или предмет уже отсутствует",false);return; }
+        if(item.m_shared.m_questItem) { Finish("Квестовый предмет нельзя сбросить или передать",false);return; }
+        string name=Observation.Name(item.m_shared.m_name);int before=item.m_stack;
+        bool accepted=player.DropItem(bag,item,d.amount);
+        int removed=before-(bag.ContainsItem(item)?item.m_stack:0);
+        Finish(accepted&&removed==d.amount?verb+": "+name+" ×"+removed:"Игра не подтвердила сброс запрошенного количества",accepted&&removed==d.amount);
     }
     private void Gather(Player player)
     {

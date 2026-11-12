@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using HarmonyLib;
 using UnityEngine;
 
 namespace ValheimAIHelper;
@@ -17,6 +18,7 @@ internal sealed class Observation
     public readonly Dictionary<string, Recipe> Recipes = new();
     public readonly Dictionary<string, Piece> Pieces = new();
     private static readonly Collider[] hits = new Collider[768];
+    private static readonly System.Reflection.FieldInfo? dropInstances = AccessTools.Field(typeof(ItemDrop), "s_instances");
     private static readonly Dictionary<string, string> categories = new()
     {
         ["Pickable"]="pickable", ["PickableItem"]="pickable", ["Door"]="door", ["Container"]="container",
@@ -75,6 +77,12 @@ internal sealed class Observation
             string id=Id(leader);o.Characters[id]=leader;o.Data.leader_id=id;
             entities.Add(new Entity {id=id,name=Name(leader.GetPlayerName()),kind="player",position=Pos(leader.transform.position),distance=Vector3.Distance(origin,leader.transform.position)});
         }
+        foreach(var other in Player.GetAllPlayers().Where(p=>p && p!=actor && p!=leader && !p.IsDead() && Vector3.Distance(origin,p.transform.position)<=60)
+            .OrderBy(p=>Vector3.SqrMagnitude(origin-p.transform.position)).Take(15))
+        {
+            string id=Id(other);o.Characters[id]=other;
+            entities.Add(new Entity {id=id,name=Name(other.GetPlayerName()),kind="player",position=Pos(other.transform.position),distance=Vector3.Distance(origin,other.transform.position)});
+        }
         foreach(var c in Character.GetAllCharacters().Where(c=>IsEnemy(actor,c,leader)||IsWildAnimal(c))
             .Where(c=>Vector3.Distance(origin,c.transform.position)<=20).OrderBy(c=>Vector3.SqrMagnitude(origin-c.transform.position)).Take(16))
         {
@@ -85,12 +93,19 @@ internal sealed class Observation
         }
         int count=Physics.OverlapSphereNonAlloc(origin,20,hits);
         var nearby=hits.Take(count).Where(c=>c).ToArray();
-        foreach(var d in nearby.Select(c=>c.GetComponentInParent<ItemDrop>()).Where(d=>d&&d.CanPickup()&&Vector3.Distance(origin,d.transform.position)<=20)
-            .Distinct().OrderBy(d=>Vector3.SqrMagnitude(origin-d.transform.position)).Take(18))
+        // Use the game's loaded ItemDrop registry, not the short collider query
+        // for interactions: small drops and drops beyond 20m were disappearing.
+        var loadedDrops = dropInstances?.GetValue(null) as IEnumerable<ItemDrop>;
+        var drops = (loadedDrops ?? UnityEngine.Object.FindObjectsOfType<ItemDrop>()).Where(d=>d && d.gameObject.activeInHierarchy && d.m_itemData!=null && d.m_itemData.m_stack>0)
+            .Where(d=>d.GetComponent<ZNetView>() is ZNetView view && view.IsValid() && Vector3.Distance(origin,d.transform.position)<=128)
+            .Distinct().OrderBy(d=>Vector3.SqrMagnitude(origin-d.transform.position)).ToArray();
+        o.Data.ground_scan_radius=128;o.Data.ground_items_total=drops.Length;o.Data.ground_items_truncated=drops.Length>80;
+        foreach(var d in drops.Take(80))
         {
             string id="drop:"+d.GetInstanceID();o.Drops[id]=d;
             entities.Add(new Entity {id=id,name=Name(d.m_itemData.m_shared.m_name),kind="item",category=d.m_itemData.m_shared.m_itemType.ToString(),
-                position=Pos(d.transform.position),distance=Vector3.Distance(origin,d.transform.position)});
+                position=Pos(d.transform.position),distance=Vector3.Distance(origin,d.transform.position),count=Mathf.Clamp(d.m_itemData.m_stack,1,100000),
+                weight=ObservationValues.Vital(d.m_itemData.GetWeight()),pickup_allowed=d.CanPickup(false),state=d.CanPickup(false)?"Выпавший предмет":"Подбор временно недоступен игре"});
         }
         var parents=nearby.SelectMany(c=>c.GetComponentsInParent<Component>(true)).Where(c=>c).Distinct().ToArray();
         var switches=parents.Where(c=>new[]{"Smelter","CookingStation","Fermenter"}.Contains(c.GetType().Name))
@@ -114,7 +129,7 @@ internal sealed class Observation
                 tool_tier=Mathf.Clamp(NativeAccess.Read(c,"m_minToolTier") is int tier?tier:0,0,20)});
         }
         foreach(var piece in objects.OfType<Piece>().Where(p=>p.GetComponent<WearNTear>() && !o.Interactables.ContainsKey(WorldId(p)))
-            .OrderBy(p=>Vector3.SqrMagnitude(origin-p.transform.position)).Take(Math.Max(0,64-entities.Count)))
+            .OrderBy(p=>Vector3.SqrMagnitude(origin-p.transform.position)).Take(Math.Max(0,128-entities.Count)))
         {
             var view=piece.GetComponent<ZNetView>();if(!view||!view.IsValid())continue;
             string id=WorldId(piece);o.Interactables[id]=piece;
@@ -123,7 +138,7 @@ internal sealed class Observation
         }
         Array.Clear(hits,0,count);
         o.Data.session_id=session;o.Data.sequence=sequence;o.Data.previous_result=ObservationValues.Text(result,240);
-        o.Data.entities=entities.Take(64).ToArray();
+        o.Data.entities=entities.Take(128).ToArray();
         float maxHealth=actor.GetMaxHealth();if(!ObservationValues.Finite(maxHealth)||maxHealth<=0)throw new InvalidOperationException("Player health is not ready");
         var effects=actor.GetSEMan().GetStatusEffects().Select(s=>Name(s.name,80)).Take(20).ToArray();
         actor.GetGuardianPowerHUD(out _,out float guardianCooldown);
@@ -158,7 +173,7 @@ internal sealed class Observation
             if(!o.Interactables.ContainsKey(id))
             {
                 o.Interactables[id]=opened!;
-                if(entities.Count>=64)entities.RemoveAt(entities.Count-1);
+                if(entities.Count>=128)entities.RemoveAt(entities.Count-1);
                 entities.Add(new Entity {id=id,name=Name(opened!.GetHoverName()),kind="interactable",category="container",
                     position=Pos(opened.transform.position),distance=Vector3.Distance(origin,opened.transform.position)});
             }
@@ -171,7 +186,7 @@ internal sealed class Observation
             }
         }
         if(EnvMan.instance){o.Data.daylight=EnvMan.IsDay();o.Data.weather=Name(EnvMan.instance.GetCurrentEnvironment().m_name,80);}
-        o.Data.entities=entities.Take(64).ToArray();
+        o.Data.entities=entities.Take(128).ToArray();
         return o;
     }
 }

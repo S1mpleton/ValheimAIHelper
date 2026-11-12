@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.5.0</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.6.0</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
   <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
@@ -48,7 +48,7 @@
         <p id="mode" class="status-line">Режим: стоп</p>
       </section>
     </div>
-    <section class="world"><h2>Персонаж</h2><p id="bridge-error" role="alert" hidden></p><p id="actor">Ждём наблюдение из игры…</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают. Закройте панель F8, чтобы разрешить движение.</p></section>
+    <section class="world"><h2>Персонаж</h2><p id="bridge-error" role="alert" hidden></p><p id="actor">Ждём наблюдение из игры…</p><p id="performance" aria-live="polite">Скорость AI появится после первого запроса.</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают. Закройте панель F8, чтобы разрешить движение.</p></section>
     <section><h2>Последние решения</h2><p class="hint">Планы, результаты действий и ошибки. Короткие ответы помощника могут появляться в игровом чате.</p><ol id="events" aria-live="polite"></ol></section>
   </div>
   <footer>Провайдеры: локальная Ollama, OpenAI и Gemini. Управление, подключения и журнал также доступны прямо в игровом меню. F9 — немедленный стоп.</footer>

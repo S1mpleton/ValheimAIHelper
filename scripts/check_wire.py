@@ -48,6 +48,7 @@ async def main():
         })}}]})
     local_requests=[]
     def ollama_provider(request):
+        if request.url.path=="/api/ps": return httpx.Response(200,json={"models":[]})
         assert request.url.host=="127.0.0.1" and request.headers.get("authorization") is None
         local_requests.append(request.url.path)
         if request.url.path=="/api/tags": return httpx.Response(200,json={"models":[{"name":"wire-agent:Q4"}]})
@@ -56,6 +57,9 @@ async def main():
         assert body["think"] is False and body["stream"] is False
         probe=body["format"]["$defs"]["Action"]["enum"]==["wait"]
         step={"action":"wait","target_id":"","duration":1,"say":"Проверка"} if probe else {"action":"drop","target_id":"inventory:stones","amount":5,"duration":1,"say":"Пять камней"}
+        text=json.dumps(body["messages"],ensure_ascii=False)
+        if not probe and "Дай лидеру" in text: step={"action":"give","target_id":"character:42","item_id":"inventory:stones","amount":5,"duration":1,"say":"Передам камни рядом с лидером"}
+        if not probe and "Подбери камень вдали" in text: step={"action":"pickup","target_id":"drop:far","amount":1,"duration":1,"say":"Подберу стопку"}
         return httpx.Response(200,json={"message":{"content":json.dumps({"steps":[step]})},"done":True})
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as upstream, httpx.AsyncClient(transport=httpx.MockTransport(ollama_provider)) as local:
         app = create_app(token=token, client=upstream,ollama_client=local)
@@ -139,11 +143,21 @@ async def main():
             assert local_plan.json()["source"]=="ollama",local_plan.text
             assert subprocess.check_output(["dotnet",str(program),"--check-extended-response","5"],input=local_plan.content,timeout=10).strip()==b"DROP_ACCEPTED:5"
             await app.state.bridge.planner.close()
+            for seq,goal,decoder,expected in [(6,"Дай лидеру 5 камней","--check-give-extended-response",b"GIVE_ACCEPTED:5"),
+                                               (8,"Подбери камень вдали","--check-pickup-extended-response",b"PICKUP_ACCEPTED:45m")]:
+                await client.post("/api/command",json={"mode":"ai","objective":goal})
+                await client.post("/api/decision",json={**extended,"sequence":seq})
+                task=app.state.bridge.planner.task
+                if task is not None: await task
+                decision=await client.post("/api/decision",json={**extended,"sequence":seq+1})
+                assert subprocess.check_output(["dotnet",str(program),decoder,str(seq+1)],input=decision.content,timeout=10).strip()==expected,decision.text
+                await app.state.bridge.planner.close()
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
     print("PASS: background plan -> destination/run/plan ID -> C# policy")
     print("PASS: all action names match; actual C# extended snapshot -> quantity drop decision -> C# policy; ordinary chat DTO")
     print("PASS: native Ollama settings/status DTOs -> local model list/check/JSON plan -> C# quantity policy; thinking disabled")
+    print("PASS: C# loaded ground stack (45m/count=7) -> local pickup plan; give exactly 5 from observed inventory to player -> C# validation")
 
 
 if __name__ == "__main__":

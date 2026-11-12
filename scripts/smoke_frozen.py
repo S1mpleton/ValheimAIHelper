@@ -42,7 +42,7 @@ def main():
                     except OSError:
                         if time.monotonic() > deadline: raise
                         time.sleep(.2)
-                assert health["version"] == "0.5.0", health
+                assert health["version"] == "0.6.0", health
                 req = urllib.request.Request(base + "/api/status", headers={"Authorization": "Bearer " + token})
                 with opener.open(req) as r: status = json.load(r)
                 assert status["mode"] == "stop" and not status["keys_present"]["openai"]
@@ -62,8 +62,8 @@ def main():
                         self.send_response(200); self.send_header("Content-Type","application/json")
                         self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw)
                     def do_GET(self):
-                        assert self.path=="/api/tags" and self.headers.get("Authorization") is None
-                        requests.append(self.path); self.respond({"models":[{"name":"smoke-agent:local"}]})
+                        assert self.path in ("/api/tags","/api/ps") and self.headers.get("Authorization") is None
+                        requests.append(self.path); self.respond({"models":[{"name":"smoke-agent:local"}] if self.path=="/api/tags" else []})
                     def do_POST(self):
                         body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))))
                         assert self.headers.get("Authorization") is None
@@ -82,7 +82,7 @@ def main():
                         assert post("/api/provider",{"provider":"ollama","model":"smoke-agent:local","ollama_url":local_url})["ok"]
                         assert post("/api/models/ollama",{})["models"]==["smoke-agent:local"]
                         assert post("/api/check/ollama",{"model":"smoke-agent:local"})["ok"]
-                        assert requests==["/api/tags","/api/show","/api/chat"]
+                        assert requests==["/api/ps","/api/tags","/api/show","/api/chat"]
                     finally:
                         server.shutdown();worker.join(timeout=3)
                 print("PASS: frozen runtime starts without Python/source in cwd; HTTP/auth/static/status/ordinary-chat")

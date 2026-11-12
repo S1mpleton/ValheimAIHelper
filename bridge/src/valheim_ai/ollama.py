@@ -8,6 +8,7 @@ import httpx
 
 from .providers import (OLLAMA_DECISION_TIMEOUT, ProviderError, ProviderUnavailable,
                         ProviderModelNotFound, ProviderLocalConfigurationError)
+from .performance import ollama_statistics
 
 DEFAULT_URL = "http://127.0.0.1:11434"
 MODEL_PATTERN = r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}"
@@ -105,12 +106,54 @@ def thinking_option(info: dict):
     return False
 
 
-async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict) -> str:
+class ModelSession:
+    """Serialize unload/load/inference; cancelling a request releases this lock."""
+    def __init__(self, event):
+        self.lock = asyncio.Lock()
+        self.selected = None
+        self.event = event
+
+    async def _select(self, client, base, model):
+        selection = (local_url(base), model)
+        if selection == self.selected: return
+        data = await request(client, base, "GET", "/api/ps")
+        rows = data.get("models")
+        if not isinstance(rows, list): raise ProviderError("Ollama: не удалось получить список загруженных моделей; переключение отменено")
+        names = set()
+        for row in rows:
+            name = row.get("name", row.get("model", "")) if isinstance(row, dict) else ""
+            if not isinstance(name, str) or not valid_model(name):
+                raise ProviderError("Ollama: некорректное имя в списке загруженных моделей; переключение отменено")
+            if name != model and name != model + ":latest": names.add(name)
+        for name in sorted(names):
+            await request(client, base, "POST", "/api/generate",
+                payload={"model": name, "keep_alive": 0, "stream": False, "think": False}, timeout=30)
+            self.event("ollama-memory", "Выгружена модель: " + name)
+        if names:
+            remaining = await request(client, base, "GET", "/api/ps")
+            if not isinstance(remaining.get("models"), list) or any(
+                row.get("name", row.get("model")) in names for row in remaining["models"] if isinstance(row, dict)):
+                raise ProviderUnavailable("Ollama ещё не выгрузила прежние модели. Дождитесь освобождения памяти и повторите переключение.")
+        self.selected = selection
+        self.event("ollama-memory", "Выбрана модель: " + model + "; остальные ранее загруженные модели выгружены")
+
+    async def select(self, client, base, model):
+        async with self.lock:
+            await self._select(client, base, model)
+
+    async def generate(self, client, base, model, messages, schema, statistics):
+        async with self.lock:
+            await self._select(client, base, model)
+            return await generate(client, base, model, messages, schema, statistics=statistics)
+
+
+async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict, *, statistics=None) -> str:
     info = await model_info(client, base, model)
     payload = {"model": model, "messages": messages, "format": schema, "stream": False,
                "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 16384, "num_predict": 2048}}
     payload["think"] = thinking_option(info)
     data = await request(client, base, "POST", "/api/chat", payload=payload, timeout=OLLAMA_DECISION_TIMEOUT - 15)
+    if statistics is not None: statistics.update(ollama_statistics(data))
     message = data.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip() or data.get("done_reason") == "length":

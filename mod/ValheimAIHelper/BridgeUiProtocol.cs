@@ -24,7 +24,18 @@ namespace ValheimAIHelper;
     [DataMember] public ProviderFailure? provider_error;
     [DataMember] public string instance_id = "";
     [DataMember] public bool planning;
+    [DataMember] public AiPerformance? performance;
     [DataMember] public BridgeEvent[] events = Array.Empty<BridgeEvent>();
+}
+[DataContract] public sealed class AiPerformance
+{
+    [DataMember] public AiSample? current, last;
+}
+[DataContract] public sealed class AiSample
+{
+    [DataMember] public string provider = "", model = "", purpose = "", status = "";
+    [DataMember] public double? request_seconds, elapsed_seconds, load_seconds, prompt_seconds, generation_seconds, tokens_per_second;
+    [DataMember] public int? prompt_tokens, output_tokens;
 }
 [DataContract] public sealed class BridgeEvent
 {

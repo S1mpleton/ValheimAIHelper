@@ -50,6 +50,9 @@ namespace ValheimAIHelper;
     public string category = "";
     public string state = "";
     public int tool_tier;
+    public int count = 1;
+    public float weight;
+    public bool pickup_allowed = true;
 }
 [Serializable] public sealed class RecipeOption
 {
@@ -64,6 +67,9 @@ namespace ValheimAIHelper;
 }
 [Serializable] public sealed class Snapshot
 {
+    public float ground_scan_radius = 20;
+    public int ground_items_total;
+    public bool ground_items_truncated;
     public int protocol_version = 1;
     public string session_id = "";
     public int sequence;

@@ -6,7 +6,7 @@ import uuid
 
 from .protocol import Action, Decision, Plan, validate_decision, wait
 from .providers import (ProviderError, ProviderUnavailable,
-                        ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)
+                        ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError, ProviderInvalidAction)
 
 IDLE_OBJECTIVE = "Поручение выполнено. Вернись к лидеру, помогай ему выживать, поддерживай еду, отдых и снаряжение. Ожидай новых поручений; не повторяй завершённый сброс, крафт или ответ."
 
@@ -22,6 +22,8 @@ class Planner:
         self.combat_policy = "defend"
         self.successful_steps = 0
         self.execution_epoch = 0
+        self.announced = False
+        self.invalid_plans = 0
 
     def interrupt_planning(self):
         if self.task is not None: self.task.cancel()
@@ -37,6 +39,8 @@ class Planner:
         self.history.clear()
         self.combat_policy = "defend"
         self.successful_steps = 0
+        self.announced = False
+        self.invalid_plans = 0
 
     async def close(self):
         task = self.task
@@ -62,14 +66,22 @@ class Planner:
                 return
             assert isinstance(result, Plan)
             intent = result.chat_intent
+            if state.explicit_chat_id in pending_ids:
+                if intent and intent.message_id != state.explicit_chat_id: intent = None
+                if intent and intent.addressed and intent.mode == "reply" and state.explicit_chat_mission is not None:
+                    state.command = state.command.model_copy(update={"objective": state.explicit_chat_mission})
+                state.explicit_chat_mission = None
+                state.explicit_chat_id = 0
             if intent is not None and intent.message_id in pending_ids and intent.addressed and intent.mode != "ignore":
                 if intent.mode in ("task", "follow", "stop"):
                     mode = "ai" if intent.mode == "task" else intent.mode
                     state.command = state.command.model_copy(update={"mode": mode, "objective": intent.objective or state.command.objective})
                     state.revision += 1
                     self.successful_steps = 0
+                    self.announced = False
                     state.event("operator", "Из обычного чата: " + state.command.objective if mode == "ai" else "Из чата: " + mode)
-                if intent.reply:
+                    state.feedback("Приступаю к поручению. Сверяю действия с миром.", key="accepted-chat-" + str(intent.message_id))
+                if intent.reply and intent.mode == "reply":
                     state.event("assistant", intent.reply)
                     state.chat_history.append({"id": 0, "speaker": "assistant", "text": intent.reply, "explicit_address": False})
             state.pending_chat = deque((m for m in state.pending_chat if m["id"] not in pending_ids), maxlen=6)
@@ -77,6 +89,8 @@ class Planner:
                 self.steps.clear(); self.plan_id = ""
                 return
             self.steps = deque(result.steps)
+            if state.command.objective == IDLE_OBJECTIVE and snapshot.leader_id and "follow" in snapshot.supported_actions and all(s.action == Action.WAIT for s in self.steps):
+                self.steps = deque([Decision(action=Action.FOLLOW,target_id=snapshot.leader_id,duration=3,say="Возвращаюсь к лидеру")])
             if result.objective_complete and self.successful_steps > 0 and not (intent and intent.addressed and intent.mode == "task"):
                 state.event("mission", "Поручение выполнено: " + state.command.objective)
                 state.command = state.command.model_copy(update={"objective":IDLE_OBJECTIVE})
@@ -85,9 +99,15 @@ class Planner:
                     if snapshot.leader_id and "follow" in snapshot.supported_actions else [wait("Поручение выполнено; ожидаю новое")])
             self.combat_policy = result.combat_policy
             self._next_id()
+            self.invalid_plans = 0
             state.provider_error = None
             state.chat_suspended = False
             state.event(state.provider, "План: " + " → ".join(s.say or s.action.value for s in result.steps))
+            if not self.announced and result.steps[0].action not in (Action.WAIT, Action.SPEAK):
+                state.feedback("План готов. Приступаю к выполнению.", key="start-plan", interval=5)
+                self.announced = True
+            elif result.steps[0].action == Action.WAIT and result.steps[0].say:
+                state.feedback("AI выбрала ожидание: " + result.steps[0].say, key="waiting-plan")
         except asyncio.CancelledError:
             raise
         except (ProviderError, TimeoutError) as exc:
@@ -98,7 +118,11 @@ class Planner:
                                     "detail": exc.diagnostic if isinstance(exc, ProviderError) else ""}
             if isinstance(exc, (ProviderUnavailable, TimeoutError)):
                 state.retry_after = time.monotonic() + 15
-            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)):
+            if isinstance(exc, ProviderInvalidAction):
+                self.invalid_plans += 1
+                self.history.append(message[:240])
+                state.retry_after = time.monotonic() + 15
+            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)) or self.invalid_plans >= 3:
                 state.chat_suspended = True
                 state.command = state.command.model_copy(update={"mode": "stop"})
                 state.revision += 1
@@ -106,6 +130,7 @@ class Planner:
                 self.plan_id = ""
                 message = "AI остановлен. " + message
             state.event("fallback", message)
+            state.feedback("Не могу выполнить поручение: " + message, key="plan-error-" + str(exc))
         finally:
             # A cancelled older task cannot clear its replacement's handle.
             if self.task is asyncio.current_task():
@@ -123,7 +148,7 @@ class Planner:
         if self.steps:
             step = self.steps[0]
             terminal = snapshot.plan_id == self.plan_id and snapshot.action_status in ("success", "blocked")
-            budget = step.duration if step.action == Action.WAIT else min(60, step.amount * 5 + 5) if step.action == Action.CRAFT else 25
+            budget = step.duration if step.action == Action.WAIT else 90 if step.action in (Action.PICKUP, Action.GIVE) else min(60, step.amount * 5 + 5) if step.action == Action.CRAFT else 25
             if terminal or now - self.step_started >= budget:
                 outcome = snapshot.previous_result if terminal else "Шаг исчерпал время"
                 self.history.append((step.action.value + ": " + outcome)[:240])
@@ -133,6 +158,16 @@ class Planner:
                 if terminal and snapshot.action_status == "success" and step.action == Action.SPEAK:
                     state.chat_history.append({"id":0,"speaker":"assistant","text":step.text,"explicit_address":False})
                 self.steps.popleft()
+                if (terminal and snapshot.action_status == "blocked") or (not terminal and step.action not in (Action.WAIT, Action.FOLLOW)):
+                    state.feedback("Не удалось выполнить " + step.action.value + ": " + outcome, key="blocked-" + step.action.value + outcome)
+                elif terminal and snapshot.action_status == "success" and step.action in (Action.PICKUP, Action.DROP, Action.GIVE, Action.TAKE, Action.DEPOSIT):
+                    state.feedback(outcome or "Игра подтвердила действие с предметами", key="success-" + self.plan_id, interval=0)
+                    # Finishing a one-off transfer must not depend on a small
+                    # model remembering to set objective_complete next cycle.
+                    if not self.steps and step.action in (Action.DROP, Action.GIVE) and not state.pending_chat:
+                        state.event("mission", "Передача/сброс завершены: " + state.command.objective)
+                        state.command = state.command.model_copy(update={"objective": IDLE_OBJECTIVE})
+                        self.successful_steps = 0
                 # A failed prerequisite invalidates dependent steps in that plan.
                 if (terminal and snapshot.action_status == "blocked") or not terminal:
                     self.steps.clear()
@@ -148,6 +183,7 @@ class Planner:
                 return step.model_copy(update={"duration": 3}), state.provider, self.plan_id
             except ValueError:
                 self.history.append("Цель плана больше не доступна в свежем наблюдении")
+                state.feedback("Не могу продолжить: цель исчезла, количество предметов изменилось или действие больше недоступно.", key="target-changed")
                 self.steps.clear()
                 self._next_id()
         # Keep a useful, explicitly requested follow going while a model thinks.

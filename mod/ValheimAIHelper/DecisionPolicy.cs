@@ -20,7 +20,7 @@ public static class DecisionPolicy
                 !ObservationValues.Finite(p.y) || !ObservationValues.Finite(p.z) || x*x + y*y + z*z > (d.action == "build" ? 64 : d.action == "look" ? 3600 : 900) || (d.action != "look" && Math.Abs(y) > 8))
                 return false;
         }
-        if ((d.action == "drop" || d.action == "take" || d.action == "deposit" || d.action == "use_on") && (d.amount < 1 || d.amount > 100000)) return false;
+        if ((d.action == "drop" || d.action == "give" || d.action == "take" || d.action == "deposit" || d.action == "use_on") && (d.amount < 1 || d.amount > 100000)) return false;
         if (d.text != null && d.text.Length > 220 || d.item_id != null && d.item_id.Length > 100 || d.rotation < 0 || d.rotation > 15) return false;
         var entity = s.entities.FirstOrDefault(e => e.id == d.target_id);
         allowCombat = allowCombat && !d.avoid_combat;
@@ -41,7 +41,8 @@ public static class DecisionPolicy
             case "hunt": return allowCombat && entity?.kind == "animal" && InRange(s.actor.position, entity);
             case "gather": return entity?.kind == "resource" && InRange(s.actor.position, entity);
             case "defend": case "flee": case "dodge": return entity?.kind == "enemy" && InRange(s.actor.position, entity);
-            case "pickup": return entity?.kind == "item" && InRange(s.actor.position, entity);
+            case "pickup": return entity?.kind == "item" && InRange(s.actor.position, entity, 128);
+            case "give": return entity?.kind == "player" && InRange(s.actor.position, entity, 60) && s.actor.inventory.Any(i => i.id == d.item_id && i.count >= d.amount);
             case "eat": return item?.food == true && item.can_eat;
             case "equip": return item?.equipable == true;
             case "unequip": return item?.equipable == true;
@@ -63,10 +64,10 @@ public static class DecisionPolicy
         }
     }
 
-    private static bool InRange(Position from, Entity target)
+    private static bool InRange(Position from, Entity target, double range = 20)
     {
         double x = from.x - target.position.x, y = from.y - target.position.y, z = from.z - target.position.z;
         double square = x * x + y * y + z * z;
-        return !double.IsNaN(square) && square <= 400 && target.distance >= 0 && target.distance <= 20;
+        return !double.IsNaN(square) && square <= range * range && target.distance >= 0 && target.distance <= range;
     }
 }

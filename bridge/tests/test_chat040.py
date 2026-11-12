@@ -64,7 +64,7 @@ async def test_contextual_followup_updates_mission_and_replies_in_game_event(sna
         await c.post("/api/chat",json={"actor_name":"Бъерн","speaker":"Лидер","text":"И ещё подбери эти камни"})
         await finish_plan(app,c,snapshot)
         assert app.state.bridge.command.objective=="Подбери камни и вернись"
-        assert any(e["source"]=="assistant" and e["message"]=="Соберу камни" for e in app.state.bridge.events)
+        assert any(e["source"]=="assistant" and "Приступаю к поручению" in e["message"] for e in app.state.bridge.events)
 
 
 async def test_contextual_stop_returns_stop_mode_and_no_cached_action_survives(snapshot):
@@ -201,7 +201,7 @@ async def test_named_question_preserves_mission_and_processed_chat_stays_in_cont
         memory=json.loads(context)
         assert any(m["text"]=="Бъерн, что у тебя в сумке?" and not m["pending"] for m in memory)
         assert any(m["speaker"]=="assistant" and not m["pending"] for m in memory)
-        assert sum(e["source"]=="assistant" for e in app.state.bridge.events)==1
+        assert sum(e["source"]=="assistant" and e["message"]=="У меня два предмета в сумке" for e in app.state.bridge.events)==1
 
 
 async def test_completed_one_off_drop_returns_to_leader_instead_of_repeating(snapshot):

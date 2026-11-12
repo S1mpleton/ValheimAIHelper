@@ -25,7 +25,11 @@ def reply(value):
 @asynccontextmanager
 async def app_client(handler):
     def no_cloud(request): raise AssertionError("Local provider must not call a cloud API")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(no_cloud)) as cloud, httpx.AsyncClient(transport=httpx.MockTransport(handler)) as local:
+    async def dispatch(request):
+        if request.url.path == "/api/ps": return httpx.Response(200, json={"models": []})
+        result = handler(request)
+        return await result if hasattr(result, "__await__") else result
+    async with httpx.AsyncClient(transport=httpx.MockTransport(no_cloud)) as cloud, httpx.AsyncClient(transport=httpx.MockTransport(dispatch)) as local:
         app=create_app(token=TOKEN,client=cloud,ollama_client=local)
         app.state.bridge.keys.update(openai="secret-openai-credential",gemini="secret-google-credential")
         async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://localhost",headers={"Authorization":"Bearer "+TOKEN}) as client:
@@ -87,7 +91,7 @@ async def test_check_uses_production_plan_schema_and_no_game_data_or_cloud_crede
         if req.url.path=="/api/show": return httpx.Response(200,json={"capabilities":["completion"],"thinking":{"values":[True,False]}})
         body=json.loads(req.content)
         assert body["format"]["properties"]["steps"] and body["format"]["$defs"]["Action"]["enum"]==["wait"]
-        assert "amount" in body["format"]["$defs"]["Decision"]["required"]
+        assert all("amount" in v["required"] for v in body["format"]["$defs"]["Decision"]["anyOf"])
         assert "chat_intent" in body["format"]["required"]
         assert body["stream"] is False and body["think"] is False and body["options"]["temperature"]==0
         assert any("api-check" in m["content"] for m in body["messages"])
@@ -166,6 +170,7 @@ async def test_busy_local_server_keeps_follow_and_sets_cooldown(snapshot):
 
 
 async def test_hallucinated_local_target_never_reaches_motor(snapshot):
+    snapshot["supported_actions"] = ["wait", "drop"]
     def handler(req):
         return httpx.Response(200,json={"capabilities":["completion"]}) if req.url.path=="/api/show" else reply(plan("drop","invented-item",amount=1))
     async with app_client(handler) as (app,client):

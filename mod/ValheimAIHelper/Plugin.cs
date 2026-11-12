@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.5.0")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.6.0")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -93,7 +93,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         if (showPanel || (InventoryGui.IsVisible() && !executor.OwnsInventory) || Menu.IsVisible() || global::Console.IsVisible() ||
             (Chat.instance != null && Chat.instance.HasFocus()))
         { executor.Pause(); return; }
-        try { executor.Tick(actor, FindLeader(), allowCombat.Value, autoSurvival.Value); }
+        try { executor.Tick(actor, FindLeader(), allowCombat.Value, autoSurvival.Value); ReportLocalBlock(); }
         catch (Exception ex)
         {
             Logger.LogWarning("Control stopped: " + ex.GetType().Name);

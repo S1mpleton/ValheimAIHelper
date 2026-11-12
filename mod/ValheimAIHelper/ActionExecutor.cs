@@ -121,9 +121,7 @@ internal sealed partial class ActionExecutor
                 if (ActionStatus == "success") ActionStatus = "running";
                 return;
             case "pickup":
-                if (!observation.Drops.TryGetValue(id, out var drop) || !drop || !drop.CanPickup()) { Finish("Предмет больше не лежит на земле"); return; }
-                if (Vector3.Distance(player.transform.position, drop.transform.position) > 2) MoveTo(player, drop.transform.position, 1.5f);
-                else { bool picked = player.Pickup(drop.gameObject, false); Finish(picked ? "Предмет подобран" : "Игра отклонила подбор", picked); }
+                PickupItem(player);
                 return;
             case "interact":
                 if (!observation.Interactables.TryGetValue(id, out var target) || !target) { Finish("Объект недоступен", false); return; }
@@ -225,13 +223,13 @@ internal sealed partial class ActionExecutor
         Result = "Отступаю: мало здоровья";
     }
 
-    private void MoveTo(Player player, Vector3 target, float stopDistance, bool run = false)
+    private void MoveTo(Player player, Vector3 target, float stopDistance, bool run = false, float maxDistance = 60)
     {
         var origin = player.transform.position;
         float distance = Vector3.Distance(origin, target);
         if (distance <= stopDistance) { lastProgress = Time.time; lastPosition = origin; Finish("Точка достигнута"); return; }
         if (player.IsEncumbered()) { Finish("Перегрузка инвентаря", false); return; }
-        if (distance > 60 || !Pathfinding.instance) { Finish("Нет доступного маршрута", false); return; }
+        if (distance > maxDistance || !Pathfinding.instance) { Finish("Нет доступного маршрута", false); return; }
         if (Time.time >= nextPath)
         {
             path.Clear(); nextPath = Time.time + .75f;

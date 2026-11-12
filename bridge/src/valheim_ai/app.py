@@ -19,7 +19,8 @@ from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_dec
 from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError,
                         decide, list_gemini_models, list_openai_models, diagnose_gemini,
                         API_TIMEOUT, DECISION_TIMEOUT, OLLAMA_DECISION_TIMEOUT, CONNECTED_TIMEOUT)
-from .ollama import DEFAULT_URL, local_url, valid_model, list_models as list_ollama_models
+from .ollama import DEFAULT_URL, ModelSession, local_url, valid_model, list_models as list_ollama_models
+from .performance import Performance
 from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
@@ -102,6 +103,13 @@ class State:
         self.chat_suspended = False
         self.chat_task: asyncio.Task | None = None
         self.check_task: asyncio.Task | None = None
+        self.switch_task: asyncio.Task | None = None
+        self.ollama_session = ModelSession(self.event)
+        self.performance = Performance()
+        self.feedback_times = {}
+        self.explicit_chat_mission = None
+        self.explicit_chat_id = 0
+        self.inference_tasks = set()
 
     @property
     def ready(self):
@@ -120,9 +128,48 @@ class State:
                 timeout=httpx.Timeout(OLLAMA_DECISION_TIMEOUT, connect=5), limits=httpx.Limits(max_connections=4))
         return self.ollama_client
 
+    async def infer(self, provider, model, key, objective, snapshot, *, base=None, purpose="plan", **kwargs):
+        task = asyncio.current_task()
+        self.inference_tasks.add(task)
+        record = self.performance.begin(provider, model, purpose)
+        outcome = "error"
+        try:
+            result = await decide(self.client_for(provider), provider, model, key, objective, snapshot,
+                ollama_url=base or self.ollama_url, ollama_session=self.ollama_session,
+                statistics=record, **kwargs)
+            outcome = "ok"
+            return result
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            self.inference_tasks.discard(task)
+            self.performance.finish(record, outcome)
+            if outcome != "cancelled" and "request_seconds" in record:
+                phase = lambda field: f"{record[field]:.1f}" if field in record else "—"
+                self.event("performance", f"{provider}/{model}: {record.get('request_seconds', 0):.1f} с; " +
+                    (f"{record['tokens_per_second']:.1f} ток/с; " if 'tokens_per_second' in record else "") +
+                    f"загрузка {phase('load_seconds')} с; вход {phase('prompt_seconds')} с; " +
+                    f"выход {phase('generation_seconds')} с; результат {outcome}")
+
     async def decide(self, objective, snapshot, **kwargs):
-        return await decide(self.client_for(self.provider), self.provider, self.model, self.keys.get(self.provider, ""),
-            objective, snapshot, ollama_url=self.ollama_url, **kwargs)
+        return await self.infer(self.provider, self.model, self.keys.get(self.provider, ""), objective, snapshot, **kwargs)
+
+    def feedback(self, message, *, key=None, interval=30):
+        if not self.chat_listening: return
+        key = key or message
+        now = time.monotonic()
+        if now - self.feedback_times.get(key, -1e9) < interval: return
+        if len(self.feedback_times) > 100: self.feedback_times.clear()
+        self.feedback_times[key] = now
+        self.event("assistant", message[:220])
+
+    def cancel_switch(self):
+        if self.switch_task is not None: self.switch_task.cancel()
+        self.switch_task = None
+
+    def cancel_inference(self):
+        for task in tuple(self.inference_tasks): task.cancel()
 
     def cancel_chat(self):
         if self.chat_task is not None:
@@ -130,6 +177,8 @@ class State:
         self.chat_task = None
         self.chat_busy = False
         self.pending_chat.clear()
+        self.explicit_chat_mission = None
+        self.explicit_chat_id = 0
 
     def cancel_check(self):
         if self.check_task is not None: self.check_task.cancel()
@@ -173,10 +222,14 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         yield
         chat_task = state.chat_task
         check_task = state.check_task
+        switch_task = state.switch_task
         state.cancel_chat()
         state.cancel_check()
+        state.cancel_switch()
+        state.cancel_inference()
         if chat_task is not None: await asyncio.gather(chat_task, return_exceptions=True)
         if check_task is not None: await asyncio.gather(check_task, return_exceptions=True)
+        if switch_task is not None: await asyncio.gather(switch_task, return_exceptions=True)
         await state.planner.close()
         if owned_client:
             await client.aclose()
@@ -272,6 +325,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "instance_id": state.instance_id,
             "planning": state.planner.task is not None,
             "checking_model": state.check_task is not None,
+            "switching_model": state.switch_task is not None,
+            "performance": state.performance.snapshot(),
         }
 
     @app.post("/api/models/{provider}", dependencies=[Depends(authenticate)])
@@ -315,15 +370,21 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             actor={"id": "api-check", "name": "API check", "position": {"x": 0, "y": 0, "z": 0},
                    "health": 1, "max_health": 1, "stamina": 0},
         )
-        if state.check_task is not None: raise HTTPException(409, "Предыдущая проверка модели ещё выполняется. Стоп/F9 отменяет её.")
+        if state.check_task is not None or state.switch_task is not None: raise HTTPException(409, "Предыдущая проверка/смена модели ещё выполняется. Стоп/F9 отменяет её.")
+        if provider == "ollama" and state.command.mode == "ai" and (state.provider, state.model, state.ollama_url) != (provider, settings.model, base):
+            state.command = state.command.model_copy(update={"mode": "stop"})
+            state.revision += 1
+            state.planner.reset()
+            state.cancel_inference()
+            state.event("bridge", "Проверка другой модели Ollama: AI остановлен, чтобы прежняя модель не загрузилась снова. После проверки сохраните подключение и включите AI.")
         revision = state.revision
         async def perform_check():
             if provider == "gemini":
                 return await diagnose_gemini(state.client, settings.model, key, probe)
             elif provider == "ollama":
-                await decide(state.client_for(provider), provider, settings.model, "",
+                await state.infer(provider, settings.model, "",
                     "Проверка подключения. Верни план из единственного действия wait, target_id='', duration=1, say='Связь работает'.",
-                    probe, planning=True, ollama_url=base)
+                    probe, planning=True, base=base, purpose="check")
                 return ["Ollama: локальная модель доступна", "JSON-план игровых действий: OK"]
             else:
                 await decide(state.client, provider, settings.model, key,
@@ -356,9 +417,36 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     async def configure(settings: ProviderSettings):
         if settings.provider != "offline" and not settings.model:
             raise HTTPException(422, "Укажите модель")
+        base = local_url(settings.ollama_url or state.ollama_url) if settings.provider == "ollama" else state.ollama_url
+        state.revision += 1
+        revision = state.revision
+        previous = list(state.inference_tasks) + [task for task in (state.chat_task, state.check_task, state.planner.task, state.switch_task) if task is not None]
+        state.cancel_chat()
+        state.cancel_check()
+        state.cancel_switch()
+        state.cancel_inference()
+        state.planner.reset()
+        state.command = Command(mode="stop", objective=state.command.objective)
+        async def prepare():
+            if previous: await asyncio.gather(*previous, return_exceptions=True)
+            if revision != state.revision: return
+            if settings.provider == "ollama":
+                await state.ollama_session.select(state.client_for("ollama"), base, settings.model)
+        task = asyncio.create_task(prepare())
+        state.switch_task = task
+        try:
+            await asyncio.wait_for(task, 90)
+        except asyncio.CancelledError:
+            if revision != state.revision: raise HTTPException(409, "Смена модели отменена") from None
+            raise
+        except (ProviderError, TimeoutError) as exc:
+            raise HTTPException(502, str(exc) if isinstance(exc, ProviderError) else "Ollama: выгрузка моделей не завершилась за 90 секунд") from None
+        finally:
+            if state.switch_task is task: state.switch_task = None
+        if revision != state.revision: raise HTTPException(409, "Смена модели отменена")
         if settings.provider in state.keys and settings.api_key.get_secret_value():
             state.keys[settings.provider] = settings.api_key.get_secret_value()
-        if settings.provider == "ollama": state.ollama_url = local_url(settings.ollama_url or state.ollama_url)
+        if settings.provider == "ollama": state.ollama_url = base
         state.retry_after = 0.0
         state.next_ai_request = 0.0
         state.request_interval_seconds = settings.request_interval_seconds
@@ -366,10 +454,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.chat_suspended = False
         state.provider = settings.provider
         state.model = settings.model
-        state.revision += 1
-        state.cancel_chat()
-        state.cancel_check()
-        state.planner.reset()
+        last = state.performance.last
+        if last and (last["provider"], last["model"]) != (state.provider, state.model): state.performance.last = None
+        state.feedback_times.clear()
         # Changing providers never implicitly starts control.
         state.command = Command(mode="stop", objective=state.command.objective)
         state.event("bridge", "Провайдер изменён; управление остановлено")
@@ -377,18 +464,25 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
 
     @app.post("/api/command", dependencies=[Depends(authenticate)])
     async def command(value: Command):
+        if value.mode != "stop" and state.switch_task is not None:
+            raise HTTPException(409, "Дождитесь завершения смены модели")
         if value.mode != "stop" and (state.last_snapshot is None or state.snapshot_error or time.monotonic() - state.last_seen >= CONNECTED_TIMEOUT):
             reason = state.snapshot_error["message"] if state.snapshot_error else "Сначала включите мод через F8 и дождитесь данных персонажа в панели"
             raise HTTPException(409, reason)
         if value.mode == "ai" and not state.ready:
             raise HTTPException(409, "Сначала выберите провайдера и добавьте API-ключ")
         state.command = value
+        if value.mode == "stop": state.provider_error = None
         state.revision += 1
         state.cancel_chat()
         state.cancel_check()
+        state.cancel_switch()
+        state.cancel_inference()
         state.planner.reset()
         state.next_ai_request = 0
+        state.feedback_times.clear()
         state.event("operator", {"stop": "Стоп", "follow": "Следовать за лидером", "ai": value.objective}[value.mode])
+        if value.mode == "ai": state.feedback("Приступаю к поручению. Готовлю план действий.")
         return {"ok": True, "revision": state.revision}
 
     @app.post("/api/chat", dependencies=[Depends(authenticate)])
@@ -402,10 +496,20 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if state.command.mode == "ai":
             state.pending_chat.append(line)
             if value.explicit_address:
-                state.planner.interrupt_planning()
+                # Addressing by name is already verified by the mod. Do not
+                # depend on a tiny model recognizing that it is being addressed.
+                if state.explicit_chat_mission is None: state.explicit_chat_mission = state.command.objective
+                state.explicit_chat_id = line["id"]
+                state.command = state.command.model_copy(update={"objective": value.text})
+                state.revision += 1
+                policy = state.planner.combat_policy
+                state.planner.reset()
+                state.planner.combat_policy = policy
                 state.next_ai_request = 0
+                state.feedback_times.clear()
+                state.feedback("Принял обращение. Готовлю ответ или действия.")
             return {"handled": False, "queued": True, "mode": "ignore", "objective": "", "reply": ""}
-        if not state.ready or state.chat_busy or state.chat_suspended or state.check_task is not None:
+        if not state.ready or state.chat_busy or state.chat_suspended or state.check_task is not None or state.switch_task is not None:
             return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
         # A listener may classify while native following/manual control continues.
         # It returns an intention only; the mod's command epoch decides whether to
@@ -442,7 +546,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)):
                 state.chat_suspended = True
                 state.provider_error = {"provider":state.provider,"model":state.model,"message":str(exc),"detail":exc.diagnostic}
-            state.event("chat", str(exc) if isinstance(exc, ProviderError) else "Время ожидания контекстного обращения истекло")
+            message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания контекстного обращения истекло"
+            state.event("chat", message)
+            if value.explicit_address: state.feedback("Не могу обработать обращение: " + message)
             return {"handled":False,"queued":False,"mode":"ignore","objective":"","reply":""}
         finally:
             if state.chat_task is chat_task:
@@ -474,6 +580,11 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             state.planner.combat_policy = policy
             state.chat_history.clear()
         state.chat_listening = snapshot.listen_chat
+        previous = state.last_snapshot
+        if (snapshot.plan_id and snapshot.plan_id != state.planner.plan_id and snapshot.plan_id != "follow-pending"
+                and snapshot.action_status in ("success", "blocked") and (previous is None or
+                    (previous.plan_id, previous.action_status) != (snapshot.plan_id, snapshot.action_status))):
+            state.planner.execution_epoch += 1
         state.last_seen = now
         state.last_snapshot = snapshot
         state.snapshot_error = None
@@ -513,6 +624,10 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 try:
                     result = await asyncio.wait_for(state.decide(state.command.objective, snapshot), timeout=state.decision_timeout)
                     source = state.provider
+                except asyncio.CancelledError:
+                    if revision == state.revision: raise
+                    result = wait("Запрос отменён новой командой")
+                    source = "fallback"
                 except (ProviderError, TimeoutError) as exc:
                     stop_for_api_error = isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError))
                     if isinstance(exc, ProviderUnavailable):
@@ -531,6 +646,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         else:
             if api_attempted:
                 state.provider_error = api_error
+                if api_error: state.feedback("Не могу выполнить поручение: " + api_error["message"])
             if stop_for_api_error:
                 state.chat_suspended = True
                 state.command = Command(mode="stop", objective=state.command.objective)

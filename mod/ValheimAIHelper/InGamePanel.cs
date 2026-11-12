@@ -21,7 +21,7 @@ public sealed partial class Plugin
     private bool uiBusy, uiPolling, uiHydrated, uiSettings, uiModelList, uiJournal, uiAdditional;
     private float nextUiPoll;
     private int uiOperation;
-    private string loggedUiError = "", lastStatusError = "";
+    private string loggedUiError = "", lastStatusError = "", lastProviderError = "";
     private Vector2 panelScroll, modelScroll;
     private GUIStyle? titleStyle, hintStyle, panelButtonStyle, panelErrorStyle;
 
@@ -115,7 +115,9 @@ public sealed partial class Plugin
                 ImportEvents(value);
                 if (!uiBusy && value.mode == "ai" && value.objective != savedObjective.Value) { uiObjective = value.objective; savedObjective.Value = value.objective; }
                 if (value.provider_error != null)
-                    uiError = value.provider_error.message + (!string.IsNullOrEmpty(value.provider_error.detail) ? " Ответ API: " + value.provider_error.detail : "");
+                    uiError = lastProviderError = value.provider_error.message + (!string.IsNullOrEmpty(value.provider_error.detail) ? " Ответ API: " + value.provider_error.detail : "");
+                else if (lastProviderError.Length > 0)
+                { if (uiError == lastProviderError) uiError = ""; lastProviderError = ""; }
                 if (!uiHydrated)
                 {
                     if (AiProviders.Known(value.provider))
@@ -176,7 +178,7 @@ public sealed partial class Plugin
         var options = new ProviderOptions { provider = uiProvider, model = uiModel.Trim(), api_key = AiProviders.RequiresKey(uiProvider) ? uiKey.Trim() : "",
             ollama_url = uiOllamaUrl.Trim(), request_interval_seconds = seconds };
         journal.RegisterSecret(options.api_key);
-        yield return uiClient.Request<BridgeOk>("/api/provider", options, value => { ok = value.ok; keyPresent = value.key_present; }, error => { if (operation == uiOperation) uiError = error; });
+        yield return uiClient.Request<BridgeOk>("/api/provider", options, value => { ok = value.ok; keyPresent = value.key_present; }, error => { if (operation == uiOperation) uiError = error; }, uiProvider == "ollama" ? 100 : 10);
         options.api_key = "";
         if (operation != uiOperation || !ok) yield break;
         uiKey = "";
@@ -310,7 +312,7 @@ public sealed partial class Plugin
             journal.RegisterSecret(uiKey.Trim());
             yield return uiClient.Request<ModelCheckReply>("/api/check/" + uiProvider, new ModelCheckRequest { model = uiModel.Trim(), api_key = AiProviders.RequiresKey(uiProvider) ? uiKey.Trim() : "", ollama_url = uiOllamaUrl.Trim() }, value =>
             {
-                if (operation == uiOperation) uiMessage = "Модель отвечает. " + string.Join("; ", value.checks ?? Array.Empty<string>());
+                if (operation == uiOperation) uiMessage = "Модель отвечает. " + string.Join("; ", value.checks ?? Array.Empty<string>()) + ". Сохраните подключение и включите AI.";
             }, error => { if (operation == uiOperation) uiError = error; }, AiProviders.UiTimeout(uiProvider));
         }
         finally { if (operation == uiOperation) uiBusy = false; }
@@ -327,6 +329,8 @@ public sealed partial class Plugin
         GUILayout.Label("Управление персонажем", titleStyle);
         string mode = !active ? "Остановлен — персонажем управляете вы" : bridgeStatus?.mode == "follow" ? "Следует за лидером" : bridgeStatus?.mode == "ai" ? "Выполняет задачу" : "Готов к команде";
         GUILayout.Label(mode, statusStyle);
+        GUILayout.Label(AiPerformanceText.Summary(bridgeStatus?.performance), hintStyle);
+        GUILayout.Label(AiPerformanceText.Details(bridgeStatus?.performance), hintStyle);
         GUILayout.Label("Помощником становится текущий персонаж. Лидер — другой игрок рядом.", hintStyle);
         if (uiError.Length > 0) GUILayout.Label(uiError, panelErrorStyle);
         else if (uiMessage.Length > 0) GUILayout.Label(uiMessage, statusStyle);

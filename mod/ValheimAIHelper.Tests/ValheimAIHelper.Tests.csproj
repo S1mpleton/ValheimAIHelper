@@ -26,5 +26,6 @@
     <Compile Include="../ValheimAIHelper/UiLayout.cs" Link="UiLayout.cs" />
     <Compile Include="../ValheimAIHelper/ChatControlPolicy.cs" Link="ChatControlPolicy.cs" />
     <Compile Include="../ValheimAIHelper/AiProviders.cs" Link="AiProviders.cs" />
+    <Compile Include="../ValheimAIHelper/AiPerformanceText.cs" Link="AiPerformanceText.cs" />
   </ItemGroup>
 </Project>

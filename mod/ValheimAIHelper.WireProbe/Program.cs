@@ -90,6 +90,9 @@ if (args.Length > 0 && args[0].Contains("extended"))
     snapshot.background_planning = true;
     snapshot.supported_actions = Capabilities.All;
     snapshot.actor.inventory = new[] { new InventoryEntry { id = "inventory:stones", name = "Камень", count = 20 } };
+    snapshot.ground_scan_radius=128;snapshot.ground_items_total=1;
+    snapshot.entities = new[] {snapshot.entities[0], new Entity {id="drop:far",name="Камень",kind="item",count=7,weight=14,distance=45,
+        position=new Position {x=snapshot.actor.position.x+45,y=snapshot.actor.position.y,z=snapshot.actor.position.z}}};
 }
 if (args.Length > 0 && args[0] == "--check-response")
 {
@@ -103,6 +106,18 @@ else if (args.Length > 0 && args[0] == "--check-plan-response")
     if (!DecisionPolicy.Accept(decision, snapshot, false) || string.IsNullOrEmpty(decision.plan_id) ||
         decision.destination == null || !decision.run) return 1;
     Console.WriteLine("PLAN_ACCEPTED:" + decision.action);
+}
+else if (args.Length > 0 && args[0] == "--check-give-extended-response")
+{
+    var decision=WireJson.Deserialize<Decision>(Console.In.ReadToEnd());
+    if(!DecisionPolicy.Accept(decision,snapshot,false)||decision.action!="give"||decision.target_id!="character:42"||decision.item_id!="inventory:stones"||decision.amount!=5)return 1;
+    Console.WriteLine("GIVE_ACCEPTED:5");
+}
+else if (args.Length > 0 && args[0] == "--check-pickup-extended-response")
+{
+    var decision=WireJson.Deserialize<Decision>(Console.In.ReadToEnd());
+    if(!DecisionPolicy.Accept(decision,snapshot,false)||decision.action!="pickup"||decision.target_id!="drop:far")return 1;
+    Console.WriteLine("PICKUP_ACCEPTED:45m");
 }
 else if (args.Length > 0 && args[0] == "--check-extended-response")
 {

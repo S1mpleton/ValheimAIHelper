@@ -69,6 +69,13 @@ async function refresh() {
     $("actor").textContent = s.actor
       ? `${s.actor.name} · здоровье ${Math.round(s.actor.health)}/${Math.round(s.actor.max_health)} · выносливость ${Math.round(s.actor.stamina)} · предметов в инвентаре: ${s.actor.inventory.length}`
       : "Ждём наблюдение из игры…";
+    const timing = s.performance;
+    const last = timing?.last;
+    const n = value => typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "—";
+    $("performance").textContent = timing?.current
+      ? `AI: ожидание ${n(timing.current.elapsed_seconds)} с · ${timing.current.model}`
+      : last ? `AI ${last.model}: ${n(last.request_seconds)} с${last.tokens_per_second != null ? ` · ${n(last.tokens_per_second)} ток/с` : ""} · ${last.status === "ok" ? "план проверен" : "ошибка/отмена"}${last.provider === "ollama" ? ` · загрузка ${n(last.load_seconds)} с · вход ${n(last.prompt_seconds)} с · генерация ${n(last.generation_seconds)} с` : ""}`
+      : "Скорость AI появится после первого запроса.";
     $("events").replaceChildren(...s.events.map(event => {
       const li = document.createElement("li");
       const time = document.createElement("time"); time.textContent = event.time;

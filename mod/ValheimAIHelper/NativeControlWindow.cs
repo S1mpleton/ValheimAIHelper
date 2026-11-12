@@ -21,7 +21,7 @@ public sealed partial class Plugin
         private readonly List<Component> tabs = new();
         private readonly List<GameObject> tabMarkers = new();
         private Component? stateLabel, messageLabel, leaderLabel, combatButton, foodButton, controlButton, logText;
-        private Component? keyInput, modelInput, intervalInput, providerButton, keyStatusLabel, credentialLabel, usageLabel;
+        private Component? keyInput, modelInput, intervalInput, providerButton, keyStatusLabel, credentialLabel, usageLabel, performanceLabel;
         private readonly List<Component> modelButtons = new();
         private int page, modelPage, logPage;
         private float nextRefresh;
@@ -250,8 +250,8 @@ public sealed partial class Plugin
         }
         private void BuildJournal(Transform tab)
         {
-            Label(tab, "Планы AI, действия и ошибки. Ключи скрываются в отчёте.", 0, 0, 812, 28, 16);
-            logText = Label(tab, "", 0, 38, 812, 246, 14);
+            performanceLabel = Label(tab, "", 0, 0, 812, 66, 15);
+            logText = Label(tab, "", 0, 74, 812, 210, 14);
             Button(tab, "Копировать отчёт", 0, 296, 260, p.CopyReport);
             Button(tab, "Сохранить в файл", 276, 296, 260, p.SaveReport);
             Button(tab, "Очистить", 552, 296, 260, () => { p.journal.Clear(); logPage = 0; });
@@ -279,7 +279,7 @@ public sealed partial class Plugin
             Set(canvas!, "scaleFactor", nativeScale);
             Vector2 settings = Menu.instance ? GameUi.SettingsSize(Menu.instance) : Vector2.zero;
             frame!.transform.localScale = Vector3.one * UiLayout.Fit(Screen.width / nativeScale, Screen.height / nativeScale, settings.x, settings.y);
-            Set(stateLabel!, "text", !p.active ? "Ручное управление" : p.executor.Result + (p.bridgeStatus?.planning == true ? " · AI обдумывает план" : ""));
+            Set(stateLabel!, "text", !p.active ? "Ручное управление" : p.executor.Result + (p.bridgeStatus?.performance?.current != null ? " · AI: " + p.bridgeStatus.performance.current.elapsed_seconds?.ToString("0") + " с" : ""));
             Set(messageLabel!, "text", p.journal.Redact(p.uiError.Length > 0 ? p.uiError : p.uiMessage));
             Set(messageLabel!, "color", p.uiError.Length > 0 ? new Color(1, .55f, .4f) : new Color(.85f, .75f, .45f));
             var leader = p.FindLeader();
@@ -289,7 +289,8 @@ public sealed partial class Plugin
             ButtonText(controlButton, "Управление персонажем: " + (p.controlByAllPlayers.Value ? "Все игроки" : "Только лидер"));
             ButtonText(providerButton, "Провайдер: " + AiProviders.DisplayName(p.uiProvider));
             Set(credentialLabel!, "text", p.uiProvider == "ollama" ? "Адрес Ollama на этом ПК (API-ключ не нужен)" : "API-ключ (только в памяти до закрытия игры)");
-            Set(usageLabel!, "text", p.uiProvider == "ollama" ? "Ollama выполняет AI локально. Скорость зависит от модели и ресурсов ПК." : "Следование работает без ключа. AI и проверка модели расходуют квоту API.");
+            Set(usageLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance));
+            Set(performanceLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance) + "\n" + AiPerformanceText.Details(p.bridgeStatus?.performance));
             Set(keyStatusLabel!, "text", p.uiProvider == "ollama" ? "Локальная модель · API-ключ не нужен" : p.HasKey(p.uiProvider) ? "API-ключ уже задан в памяти службы" : "Введите API-ключ и сохраните подключение");
             EnumValue(keyInput!, "contentType", p.uiProvider == "ollama" ? "Standard" : "Password");
             foreach (var button in busyButtons) Set(button, "interactable", !p.uiBusy);

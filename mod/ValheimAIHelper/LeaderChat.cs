@@ -103,7 +103,7 @@ public sealed partial class Plugin
                 if (!QueuedSpeaker(request)) continue;
                 LeaderChatReply? reply = null;
                 yield return uiClient.Request<LeaderChatReply>("/api/chat", request, value => reply = value,
-                    error => AddLog("chat", error), AiProviders.UiTimeout(uiProvider));
+                    error => { AddLog("chat", error); if (request.explicit_address && epoch == uiOperation) ChatReply("Не удалось передать обращение: " + error); }, AiProviders.UiTimeout(uiProvider));
                 if (!allowChat.Value || epoch != uiOperation || reply == null || !reply.handled || !QueuedSpeaker(request)) continue;
                 if (reply.mode == "stop") { StopFromPanel(); if (reply.reply.Length > 0) ChatReply(reply.reply); }
                 else if (reply.mode is "task" or "follow")
@@ -123,7 +123,8 @@ public sealed partial class Plugin
     private IEnumerator CommandFromChat(string mode)
     {
         yield return StartMode(mode);
-        ChatReply(uiError.Length > 0 ? uiError : mode == "follow" ? "Следую за вами." : "Задача принята. Выполняю.");
+        if (uiError.Length > 0) ChatReply("Не могу начать: " + uiError);
+        else if (mode == "follow") ChatReply("Следую за вами.");
     }
     private void ChatReply(string text)
     {

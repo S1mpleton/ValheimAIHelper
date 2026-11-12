@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using BepInEx;
 using UnityEngine;
 
@@ -15,11 +16,26 @@ public sealed partial class Plugin
     private int lastEventId;
     private float nextMenuProbe;
     private string menuProbeError = "";
+    private string lastLocalBlock = "";
+    private float nextLocalBlockReply;
+    private int observedGroundItems;
+    private string observedInventory = "", observedDrops = "";
+
+    private void ReportLocalBlock()
+    {
+        if (!active || !allowChat.Value || executor.ActionStatus != "blocked" ||
+            (executor.PlanId.Length > 0 && executor.PlanId != "follow-pending")) return;
+        string reason = executor.Result;
+        if (reason == lastLocalBlock && Time.realtimeSinceStartup < nextLocalBlockReply) return;
+        lastLocalBlock = reason; nextLocalBlockReply = Time.realtimeSinceStartup + 30;
+        ChatReply("Не могу продолжить движение: " + reason);
+        AddLog("blocked", reason);
+    }
 
     private void InitRuntime()
     {
         journal.RegisterSecret(bridgeToken.Value);
-        AddLog("version", "Valheim AI Helper 0.5.0; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
+        AddLog("version", "Valheim AI Helper 0.6.0; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
         if (!autoBridge.Value) { AddLog("service", "Автозапуск выключен в конфигурации; используется внешний мост."); return; }
         StartLocalRuntime();
     }
@@ -60,6 +76,10 @@ public sealed partial class Plugin
     private void AddLog(string source, string text) => journal.Add(source, text);
     private void LogMotor(Decision decision, Observation observation)
     {
+        observedGroundItems = observation.Data.ground_items_total;
+        observedInventory = string.Join("; ", observation.Data.actor.inventory.Select(i => i.name + " ×" + i.count + " [" + i.id + "]"));
+        observedDrops = string.Join("; ", observation.Data.entities.Where(e => e.kind == "item").Select(e => e.name + " ×" + e.count + " (" + e.distance.ToString("0") + "м) [" + e.id + "]")) +
+            (observation.Data.ground_items_truncated ? "; показаны ближайшие 80 стопок" : "");
         string message = decision.source + " · " + decision.action + " · " + decision.target_id + " · " + executor.Result;
         if (message == lastMotor) return;
         lastMotor = message;
@@ -78,9 +98,12 @@ public sealed partial class Plugin
                 if (events[i].source == "assistant" && allowChat.Value && Player.m_localPlayer) ChatReply(events[i].message);
             }
     }
-    private string Report() => journal.Redact("Valheim AI Helper 0.5.0\nValheim: " + global::Version.GetVersionString() +
+    private string Report() => journal.Redact("Valheim AI Helper 0.6.0\nValheim: " + global::Version.GetVersionString() +
         "\nMode: " + (active ? bridgeStatus?.mode ?? "connecting" : "manual") + "\nLeader: " + leaderName.Value +
         "\nAI: " + uiProvider + " / " + uiModel + (uiProvider == "ollama" ? "\nOllama: " + (BridgeAddress.IsValid(uiOllamaUrl) ? uiOllamaUrl : "(некорректный адрес)") + "; think=false" : "") + "\nCombat: " + allowCombat.Value + "; survival: " + autoSurvival.Value + "; chat control: " + (controlByAllPlayers.Value ? "all players" : "leader only") +
+        "\nPerformance: " + AiPerformanceText.Summary(bridgeStatus?.performance) + "\n" + AiPerformanceText.Details(bridgeStatus?.performance) +
+        "\nGround items: " + observedGroundItems +
+        "\nInventory: " + observedInventory + "\nDropped items: " + observedDrops +
         "\nStatus: " + status + "\nError: " + uiError + "\n\n" + journal.Text);
     private void CopyReport() { UnityEngine.GUIUtility.systemCopyBuffer = Report(); uiMessage = "Отчёт скопирован. Его можно отправить сообщением."; }
     private void SaveReport()

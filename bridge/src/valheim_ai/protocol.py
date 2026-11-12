@@ -105,6 +105,9 @@ class Entity(StrictModel):
     category: str = Field(default="", max_length=40)
     state: str = Field(default="", max_length=240)
     tool_tier: int = Field(default=0, ge=0, le=20)
+    count: int = Field(default=1, ge=1, le=100000)
+    weight: float = Field(default=0, ge=0)
+    pickup_allowed: bool = True
 
 
 class RecipeOption(StrictModel):
@@ -129,7 +132,10 @@ class Snapshot(StrictModel):
     session_id: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
     sequence: int = Field(ge=1)
     actor: Actor
-    entities: list[Entity] = Field(default_factory=list, max_length=64)
+    entities: list[Entity] = Field(default_factory=list, max_length=128)
+    ground_scan_radius: float = Field(default=20, ge=0, le=200)
+    ground_items_total: int = Field(default=0, ge=0)
+    ground_items_truncated: bool = False
     leader_id: str = Field(default="", max_length=100)
     previous_result: str = Field(default="", max_length=240)
     background_planning: bool = False
@@ -177,6 +183,7 @@ class Action(str, Enum):
     INTERACT = "interact"
     USE = "use"
     DROP = "drop"
+    GIVE = "give"
     UNEQUIP = "unequip"
     HIDE_WEAPON = "hide_weapon"
     SHOW_WEAPON = "show_weapon"
@@ -258,6 +265,24 @@ def wait(reason: str = "") -> Decision:
     return Decision(action=Action.WAIT, target_id="", duration=1, say=reason[:240])
 
 
+def inventory_status(decision: Decision, snapshot: Snapshot) -> Decision:
+    """A planned transfer is not an already completed inventory operation."""
+    items = {i.id: i.name for i in [*snapshot.actor.inventory, *snapshot.container_inventory]}
+    entities = {e.id: e for e in snapshot.entities}
+    action = decision.action
+    text = ""
+    if action == Action.PICKUP and decision.target_id in entities:
+        item = entities[decision.target_id]
+        text = f"Подхожу к выпавшей стопке: {item.name} ×{item.count}"
+    elif action == Action.GIVE and decision.target_id in entities:
+        text = f"Подхожу к {entities[decision.target_id].name}, чтобы передать {items.get(decision.item_id, '')} ×{decision.amount}"
+    elif action == Action.DROP:
+        text = f"Сбрасываю {items.get(decision.target_id, '')} ×{decision.amount}"
+    elif action in (Action.TAKE, Action.DEPOSIT):
+        text = ("Беру из контейнера " if action == Action.TAKE else "Кладу в контейнер ") + f"{items.get(decision.item_id, '')} ×{decision.amount}"
+    return decision.model_copy(update={"say": text[:240]}) if text else decision
+
+
 def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     """Never accept invented targets or arbitrary code from a provider."""
     if decision.destination is not None and decision.action not in (Action.MOVE, Action.JUMP, Action.BUILD, Action.LOOK):
@@ -312,7 +337,13 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     elif decision.action in (Action.ATTACK, Action.SECONDARY_ATTACK, Action.DEFEND, Action.FLEE, Action.DODGE):
         valid = target is not None and target.kind == "enemy" and target.distance <= 20
     elif decision.action == Action.PICKUP:
-        valid = target is not None and target.kind == "item" and target.distance <= 20
+        if target is None or target.kind != "item": raise ValueError("Pickup target must be a dropped item")
+        valid = target.distance <= 128
+    elif decision.action == Action.GIVE:
+        if target is None or target.kind != "player": raise ValueError("Give recipient must be an observed player")
+        if decision.item_id not in inventory: raise ValueError("Inventory item not observed")
+        if decision.amount > inventory[decision.item_id].count: raise ValueError("Not enough items in this stack")
+        valid = target.distance <= 60
     elif decision.action == Action.EAT:
         valid = decision.target_id in inventory and inventory[decision.target_id].food and inventory[decision.target_id].can_eat
     elif decision.action == Action.EQUIP:
@@ -322,7 +353,9 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     elif decision.action == Action.INTERACT:
         valid = target is not None and target.kind == "interactable" and target.distance <= 20
     elif decision.action in (Action.DROP, Action.UNEQUIP):
-        valid = decision.target_id in inventory and (decision.action != Action.DROP or decision.amount <= inventory[decision.target_id].count)
+        if decision.target_id not in inventory: raise ValueError("Inventory item not observed")
+        if decision.action == Action.DROP and decision.amount > inventory[decision.target_id].count: raise ValueError("Not enough items in this stack")
+        valid = decision.action != Action.UNEQUIP or inventory[decision.target_id].equipable
     elif decision.action == Action.HUNT:
         valid = target is not None and target.kind == "animal"
     elif decision.action == Action.GATHER:
@@ -347,6 +380,7 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     # Recompute range too: never trust only the sender's distance label.
     if target and decision.action != Action.FOLLOW:
         a, b = snapshot.actor.position, target.position
-        if math.dist((a.x, a.y, a.z), (b.x, b.y, b.z)) > 20:
+        limit = 128 if decision.action == Action.PICKUP else 60 if decision.action == Action.GIVE else 20
+        if math.dist((a.x, a.y, a.z), (b.x, b.y, b.z)) > limit:
             raise ValueError("Target is out of range")
     return decision
