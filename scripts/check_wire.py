@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge/src"))
 from valheim_ai.app import create_app
 from valheim_ai.protocol import Action
+from valheim_ai.providers import OLLAMA_DECISION_TIMEOUT
 
 
 async def main():
@@ -21,6 +22,7 @@ async def main():
     subprocess.run(["dotnet", str(program), "--check-game-access", str(plugin)], check=True, timeout=10)
     encoded = subprocess.check_output(["dotnet", str(program)], timeout=10)
     capabilities = json.loads(subprocess.check_output(["dotnet", str(program), "--capabilities"], timeout=10))
+    assert int(subprocess.check_output(["dotnet",str(program),"--ollama-ui-timeout"],timeout=10))>OLLAMA_DECISION_TIMEOUT
     assert set(capabilities) == {a.value for a in Action}, "Mod/bridge action catalog mismatch"
     original = json.loads(encoded)
     assert original["actor"]["name"] == "Бьёрн"
@@ -44,8 +46,19 @@ async def main():
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
             "action": "move", "target_id": "", "duration": 2, "say": "Иду вперёд"
         })}}]})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as upstream:
-        app = create_app(token=token, client=upstream)
+    local_requests=[]
+    def ollama_provider(request):
+        assert request.url.host=="127.0.0.1" and request.headers.get("authorization") is None
+        local_requests.append(request.url.path)
+        if request.url.path=="/api/tags": return httpx.Response(200,json={"models":[{"name":"wire-agent:Q4"}]})
+        if request.url.path=="/api/show": return httpx.Response(200,json={"capabilities":["completion"],"thinking":{"values":[False]}})
+        body=json.loads(request.content)
+        assert body["think"] is False and body["stream"] is False
+        probe=body["format"]["$defs"]["Action"]["enum"]==["wait"]
+        step={"action":"wait","target_id":"","duration":1,"say":"Проверка"} if probe else {"action":"drop","target_id":"inventory:stones","amount":5,"duration":1,"say":"Пять камней"}
+        return httpx.Response(200,json={"message":{"content":json.dumps({"steps":[step]})},"done":True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as upstream, httpx.AsyncClient(transport=httpx.MockTransport(ollama_provider)) as local:
+        app = create_app(token=token, client=upstream,ollama_client=local)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Authorization": "Bearer " + token}) as client:
             first = await client.post("/api/decision", content=encoded, headers={"Content-Type": "application/json"})
             assert first.status_code == 200, first.text
@@ -110,10 +123,27 @@ async def main():
             chatted = await client.post("/api/chat",content=chat_bytes,headers={"Content-Type":"application/json"})
             assert chatted.status_code==200 and chatted.json()["queued"],chatted.text
             await app.state.bridge.planner.close()
+            # Switch using exactly the native menu's DTO; no fake local API key.
+            settings=subprocess.check_output(["dotnet",str(program),"--ui-ollama"],timeout=10)
+            configured=await client.post("/api/provider",content=settings,headers={"Content-Type":"application/json"})
+            assert configured.status_code==200 and not configured.json()["key_present"],configured.text
+            assert (await client.post("/api/models/ollama",json={})).json()["models"]==["wire-agent:Q4"]
+            assert (await client.post("/api/check/ollama",json={"model":"wire-agent:Q4"})).status_code==200
+            status=await client.get("/api/status")
+            assert subprocess.check_output(["dotnet",str(program),"--read-ollama-status"],input=status.content,timeout=10).strip()==b"OLLAMA_STATUS_OK"
+            await client.post("/api/command",json={"mode":"ai","objective":"Выбрось 5 камней"})
+            await client.post("/api/decision",json={**extended,"sequence":4})
+            task=app.state.bridge.planner.task
+            if task is not None: await task
+            local_plan=await client.post("/api/decision",json={**extended,"sequence":5})
+            assert local_plan.json()["source"]=="ollama",local_plan.text
+            assert subprocess.check_output(["dotnet",str(program),"--check-extended-response","5"],input=local_plan.content,timeout=10).strip()==b"DROP_ACCEPTED:5"
+            await app.state.bridge.planner.close()
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
     print("PASS: background plan -> destination/run/plan ID -> C# policy")
     print("PASS: all action names match; actual C# extended snapshot -> quantity drop decision -> C# policy; ordinary chat DTO")
+    print("PASS: native Ollama settings/status DTOs -> local model list/check/JSON plan -> C# quantity policy; thinking disabled")
 
 
 if __name__ == "__main__":

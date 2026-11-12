@@ -17,6 +17,8 @@ namespace ValheimAIHelper;
 {
     [DataMember] public string provider = "offline", model = "", mode = "stop", objective = "";
     [DataMember] public bool connected;
+    [DataMember] public string ollama_url = AiProviders.DefaultOllamaUrl;
+    [DataMember] public bool provider_ready;
     [DataMember] public int request_interval_seconds = 20;
     [DataMember] public BridgeKeys keys_present = new();
     [DataMember] public ProviderFailure? provider_error;
@@ -32,15 +34,16 @@ namespace ValheimAIHelper;
 [DataContract] public sealed class ProviderOptions
 {
     [DataMember] public string provider = "gemini", model = "", api_key = "";
+    [DataMember] public string ollama_url = AiProviders.DefaultOllamaUrl;
     [DataMember] public int request_interval_seconds = 20;
 }
 [DataContract] public sealed class BridgeCommand
 {
     [DataMember] public string mode = "stop", objective = "";
 }
-[DataContract] public sealed class ModelListRequest { [DataMember] public string api_key = ""; }
+[DataContract] public sealed class ModelListRequest { [DataMember] public string api_key = "", ollama_url = AiProviders.DefaultOllamaUrl; }
 [DataContract] public sealed class ModelListReply { [DataMember] public string[] models = Array.Empty<string>(); }
-[DataContract] public sealed class ModelCheckRequest { [DataMember] public string model = "", api_key = ""; }
+[DataContract] public sealed class ModelCheckRequest { [DataMember] public string model = "", api_key = "", ollama_url = AiProviders.DefaultOllamaUrl; }
 [DataContract] public sealed class ModelCheckReply
 {
     [DataMember] public bool ok;

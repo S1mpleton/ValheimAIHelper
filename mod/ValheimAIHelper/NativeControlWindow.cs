@@ -21,7 +21,7 @@ public sealed partial class Plugin
         private readonly List<Component> tabs = new();
         private readonly List<GameObject> tabMarkers = new();
         private Component? stateLabel, messageLabel, leaderLabel, combatButton, foodButton, controlButton, logText;
-        private Component? keyInput, modelInput, intervalInput, providerButton, keyStatusLabel;
+        private Component? keyInput, modelInput, intervalInput, providerButton, keyStatusLabel, credentialLabel, usageLabel;
         private readonly List<Component> modelButtons = new();
         private int page, modelPage, logPage;
         private float nextRefresh;
@@ -217,7 +217,7 @@ public sealed partial class Plugin
             Button(main, "Включить AI", 276, 192, 260, () => { p.uiObjective = CompanionObjective; p.StartCoroutine(p.StartMode("ai")); }, true);
             Button(main, "Стоп", 552, 192, 260, p.StopFromPanel);
             Button(main, "Дополнительно  ›", 0, 258, 812, () => { additional = true; ShowPage(); });
-            Label(main, "Следование работает без ключа. AI и проверка модели расходуют квоту API.", 0, 336, 812, 42, 16);
+            usageLabel = Label(main, "", 0, 336, 812, 42, 16);
             Button(advanced, "‹  Персонаж", 0, 0, 200, () => { additional = false; ShowPage(); });
             Label(advanced, "Дополнительно", 228, 7, 570, 28, 21);
             combatButton = Button(advanced, "", 0, 64, 812, () => p.allowCombat.Value = !p.allowCombat.Value);
@@ -228,11 +228,12 @@ public sealed partial class Plugin
         private void BuildConnection(Transform tab)
         {
             providerButton = Button(tab, "", 0, 0, 270, () =>
-            { p.uiProvider = p.uiProvider == "openai" ? "gemini" : "openai"; p.uiModels = Array.Empty<string>(); p.uiKey = p.uiModel = ""; modelPage = 0; }, true);
-            Label(tab, "API-ключ (только в памяти до закрытия игры)", 0, 48, 812, 25, 17);
-            keyInput = InputField(tab, p.uiKey, 0, 76, 812, 36, 512, s => { p.uiKey = s; p.uiError = ""; }, password: true);
-            Label(tab, "API-имя модели", 0, 124, 510, 25, 17);
-            modelInput = InputField(tab, p.uiModel, 0, 152, 510, 36, 100, s => p.uiModel = s);
+            { p.SelectProvider(AiProviders.Next(p.uiProvider)); modelPage = 0; }, true);
+            credentialLabel = Label(tab, "", 0, 48, 812, 25, 17);
+            keyInput = InputField(tab, p.uiProvider == "ollama" ? p.uiOllamaUrl : p.uiKey, 0, 76, 812, 36, 512,
+                s => { if (p.uiProvider == "ollama") p.uiOllamaUrl = s; else p.uiKey = s; p.uiError = ""; }, password: p.uiProvider != "ollama");
+            Label(tab, "Имя модели", 0, 124, 510, 25, 17);
+            modelInput = InputField(tab, p.uiModel, 0, 152, 510, 36, 200, s => p.uiModel = s);
             Button(tab, "Получить модели", 528, 152, 284, () => p.StartCoroutine(p.FetchModels()), true);
             for (int i = 0; i < 2; i++)
             {
@@ -241,7 +242,7 @@ public sealed partial class Plugin
                 { int index = modelPage * 2 + slot; if (index < p.uiModels.Length) p.uiModel = p.uiModels[index]; }));
             }
             Button(tab, "Ещё модели", 684, 215, 128, () => { if (p.uiModels.Length > 0) modelPage = (modelPage + 1) % ((p.uiModels.Length + 1) / 2); });
-            Label(tab, "Пауза API, сек. (20 ≈ 3 запроса/мин)", 0, 299, 416, 24, 15);
+            Label(tab, "Интервал AI, сек. (20 ≈ 3 запроса/мин)", 0, 299, 416, 24, 15);
             intervalInput = InputField(tab, p.uiInterval, 422, 291, 74, 36, 3, s => p.uiInterval = s);
             Button(tab, "Сохранить", 528, 291, 284, () => p.StartCoroutine(p.ApplySettings()), true);
             Button(tab, "Проверить модель", 528, 336, 284, () => p.StartCoroutine(p.CheckModel()), true);
@@ -286,11 +287,14 @@ public sealed partial class Plugin
             ButtonText(combatButton, "Бой: " + (p.allowCombat.Value ? "включён" : "выключен"));
             ButtonText(foodButton, "Еда: " + (p.autoSurvival.Value ? "автоматически" : "по команде"));
             ButtonText(controlButton, "Управление персонажем: " + (p.controlByAllPlayers.Value ? "Все игроки" : "Только лидер"));
-            ButtonText(providerButton, p.uiProvider == "openai" ? "Провайдер: OpenAI" : "Провайдер: Gemini");
-            Set(keyStatusLabel!, "text", p.HasKey(p.uiProvider) ? "API-ключ уже задан в памяти службы" : "Введите API-ключ и сохраните подключение");
+            ButtonText(providerButton, "Провайдер: " + AiProviders.DisplayName(p.uiProvider));
+            Set(credentialLabel!, "text", p.uiProvider == "ollama" ? "Адрес Ollama на этом ПК (API-ключ не нужен)" : "API-ключ (только в памяти до закрытия игры)");
+            Set(usageLabel!, "text", p.uiProvider == "ollama" ? "Ollama выполняет AI локально. Скорость зависит от модели и ресурсов ПК." : "Следование работает без ключа. AI и проверка модели расходуют квоту API.");
+            Set(keyStatusLabel!, "text", p.uiProvider == "ollama" ? "Локальная модель · API-ключ не нужен" : p.HasKey(p.uiProvider) ? "API-ключ уже задан в памяти службы" : "Введите API-ключ и сохраните подключение");
+            EnumValue(keyInput!, "contentType", p.uiProvider == "ollama" ? "Standard" : "Password");
             foreach (var button in busyButtons) Set(button, "interactable", !p.uiBusy);
             foreach (var input in new[] { keyInput, modelInput, intervalInput }) if (input != null) Set(input, "interactable", !p.uiBusy);
-            Sync(modelInput, p.uiModel); Sync(keyInput, p.uiKey); Sync(intervalInput, p.uiInterval);
+            Sync(modelInput, p.uiModel); Sync(keyInput, p.uiProvider == "ollama" ? p.uiOllamaUrl : p.uiKey); Sync(intervalInput, p.uiInterval);
             for (int i = 0; i < modelButtons.Count; i++)
             {
                 int index = modelPage * 2 + i; bool available = index < p.uiModels.Length;

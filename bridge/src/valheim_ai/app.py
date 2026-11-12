@@ -6,36 +6,51 @@ import os
 from pathlib import Path
 import secrets
 import time
+import re
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision, Plan
-from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited,
+from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError,
                         decide, list_gemini_models, list_openai_models, diagnose_gemini,
-                        API_TIMEOUT, DECISION_TIMEOUT, CONNECTED_TIMEOUT)
+                        API_TIMEOUT, DECISION_TIMEOUT, OLLAMA_DECISION_TIMEOUT, CONNECTED_TIMEOUT)
+from .ollama import DEFAULT_URL, local_url, valid_model, list_models as list_ollama_models
 from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
 
 
 class ProviderSettings(StrictModel):
-    provider: str = Field(pattern="^(openai|gemini|offline)$")
-    model: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9._-]*$")
+    provider: str = Field(pattern="^(openai|gemini|ollama|offline)$")
+    model: str = Field(default="", max_length=200)
     api_key: SecretStr = SecretStr("")
     request_interval_seconds: int = Field(default=20, ge=4, le=300)
+    ollama_url: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def provider_fields(self):
+        if self.model: validate_model_name(self.provider, self.model)
+        if self.provider == "ollama" and self.ollama_url: self.ollama_url = local_url(self.ollama_url)
+        return self
 
 
 class ModelListRequest(StrictModel):
     api_key: SecretStr = SecretStr("")
+    ollama_url: str | None = Field(default=None, max_length=256)
 
 
 class ProviderCheckRequest(ModelListRequest):
-    model: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9._-]+$")
+    model: str = Field(min_length=1, max_length=200)
+
+
+def validate_model_name(provider: str, name: str):
+    if not (valid_model(name) if provider == "ollama" else re.fullmatch(r"[a-zA-Z0-9._-]{1,100}", name)):
+        raise ValueError("Неверное имя модели для выбранного провайдера")
 
 
 class Command(StrictModel):
@@ -51,9 +66,12 @@ class ChatRequest(StrictModel):
 
 
 class State:
-    def __init__(self, token: str, client: httpx.AsyncClient):
+    def __init__(self, token: str, client: httpx.AsyncClient, ollama_client: httpx.AsyncClient | None = None):
         self.token = token
         self.client = client
+        self.ollama_url = DEFAULT_URL
+        self.ollama_client = ollama_client
+        self.owns_ollama_client = ollama_client is None
         self.provider = "offline"
         self.model = ""
         self.keys = {
@@ -83,6 +101,28 @@ class State:
         self.chat_listening = True
         self.chat_suspended = False
         self.chat_task: asyncio.Task | None = None
+        self.check_task: asyncio.Task | None = None
+
+    @property
+    def ready(self):
+        return bool(self.model and (self.provider == "ollama" or self.keys.get(self.provider)))
+
+    @property
+    def decision_timeout(self):
+        return OLLAMA_DECISION_TIMEOUT if self.provider == "ollama" else DECISION_TIMEOUT
+
+    def client_for(self, provider):
+        if provider != "ollama": return self.client
+        if self.ollama_client is None:
+            # Loopback inference must never inherit a corporate/cloud proxy or
+            # cloud-provider credentials. URLs are validated numeric loopback.
+            self.ollama_client = httpx.AsyncClient(trust_env=False, follow_redirects=False,
+                timeout=httpx.Timeout(OLLAMA_DECISION_TIMEOUT, connect=5), limits=httpx.Limits(max_connections=4))
+        return self.ollama_client
+
+    async def decide(self, objective, snapshot, **kwargs):
+        return await decide(self.client_for(self.provider), self.provider, self.model, self.keys.get(self.provider, ""),
+            objective, snapshot, ollama_url=self.ollama_url, **kwargs)
 
     def cancel_chat(self):
         if self.chat_task is not None:
@@ -90,6 +130,10 @@ class State:
         self.chat_task = None
         self.chat_busy = False
         self.pending_chat.clear()
+
+    def cancel_check(self):
+        if self.check_task is not None: self.check_task.cancel()
+        self.check_task = None
 
     def event(self, source: str, message: str):
         if self.events and self.events[0]["source"] == source and self.events[0]["message"] == message:
@@ -114,24 +158,30 @@ def load_token(data_dir: Path) -> str:
     return token
 
 
-def create_app(token: str | None = None, client: httpx.AsyncClient | None = None) -> FastAPI:
+def create_app(token: str | None = None, client: httpx.AsyncClient | None = None,
+               ollama_client: httpx.AsyncClient | None = None) -> FastAPI:
     owned_client = client is None
     client = client or httpx.AsyncClient(
         timeout=httpx.Timeout(API_TIMEOUT, connect=5), follow_redirects=False,
         limits=httpx.Limits(max_connections=4),
     )
     token = token or load_token(Path(os.environ.get("VALHEIM_AI_DATA_DIR", ".local")))
-    state = State(token, client)
+    state = State(token, client, ollama_client)
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         chat_task = state.chat_task
+        check_task = state.check_task
         state.cancel_chat()
+        state.cancel_check()
         if chat_task is not None: await asyncio.gather(chat_task, return_exceptions=True)
+        if check_task is not None: await asyncio.gather(check_task, return_exceptions=True)
         await state.planner.close()
         if owned_client:
             await client.aclose()
+        if state.owns_ollama_client and state.ollama_client is not None:
+            await state.ollama_client.aclose()
 
     app = FastAPI(title="Valheim AI Helper", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.bridge = state
@@ -206,6 +256,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         return {
             "provider": state.provider,
             "model": state.model,
+            "ollama_url": state.ollama_url,
+            "provider_ready": state.ready,
             "request_interval_seconds": state.request_interval_seconds,
             "keys_present": {k: bool(v) for k, v in state.keys.items()},
             "mode": state.command.mode,
@@ -219,19 +271,25 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "events": list(state.events),
             "instance_id": state.instance_id,
             "planning": state.planner.task is not None,
+            "checking_model": state.check_task is not None,
         }
 
     @app.post("/api/models/{provider}", dependencies=[Depends(authenticate)])
     async def models(provider: str, settings: ModelListRequest):
-        if provider not in state.keys:
+        if provider not in (*state.keys, "ollama"):
             raise HTTPException(404, "Неизвестный провайдер")
-        key = settings.api_key.get_secret_value() or state.keys[provider]
-        if not key:
+        key = settings.api_key.get_secret_value() or state.keys.get(provider, "")
+        if provider != "ollama" and not key:
             raise HTTPException(409, "Введите API-ключ или примените его в настройках")
         try:
-            loader = list_gemini_models if provider == "gemini" else list_openai_models
-            values = await asyncio.wait_for(loader(state.client, key), DECISION_TIMEOUT)
+            if provider == "ollama":
+                values = await asyncio.wait_for(list_ollama_models(state.client_for(provider), local_url(settings.ollama_url or state.ollama_url)), 20)
+            else:
+                loader = list_gemini_models if provider == "gemini" else list_openai_models
+                values = await asyncio.wait_for(loader(state.client, key), DECISION_TIMEOUT)
             return {"models": values}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
         except (ProviderError, TimeoutError) as exc:
             message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
             if isinstance(exc, ProviderError) and exc.diagnostic:
@@ -240,10 +298,15 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
 
     @app.post("/api/check/{provider}", dependencies=[Depends(authenticate)])
     async def check_provider(provider: str, settings: ProviderCheckRequest):
-        if provider not in state.keys:
+        if provider not in (*state.keys, "ollama"):
             raise HTTPException(404, "Неизвестный провайдер")
-        key = settings.api_key.get_secret_value() or state.keys[provider]
-        if not key:
+        try:
+            validate_model_name(provider, settings.model)
+            base = local_url(settings.ollama_url or state.ollama_url) if provider == "ollama" else DEFAULT_URL
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        key = settings.api_key.get_secret_value() or state.keys.get(provider, "")
+        if provider != "ollama" and not key:
             raise HTTPException(409, "Введите API-ключ или примените его в настройках")
         # Explicit operator-triggered check uses the exact production adapter and schema,
         # but no game observations or control state. The result is never sent to the mod.
@@ -252,19 +315,39 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             actor={"id": "api-check", "name": "API check", "position": {"x": 0, "y": 0, "z": 0},
                    "health": 1, "max_health": 1, "stamina": 0},
         )
-        try:
+        if state.check_task is not None: raise HTTPException(409, "Предыдущая проверка модели ещё выполняется. Стоп/F9 отменяет её.")
+        revision = state.revision
+        async def perform_check():
             if provider == "gemini":
-                checks = await asyncio.wait_for(diagnose_gemini(state.client, settings.model, key, probe), DECISION_TIMEOUT)
+                return await diagnose_gemini(state.client, settings.model, key, probe)
+            elif provider == "ollama":
+                await decide(state.client_for(provider), provider, settings.model, "",
+                    "Проверка подключения. Верни план из единственного действия wait, target_id='', duration=1, say='Связь работает'.",
+                    probe, planning=True, ollama_url=base)
+                return ["Ollama: локальная модель доступна", "JSON-план игровых действий: OK"]
             else:
-                await asyncio.wait_for(decide(state.client, provider, settings.model, key,
-                                             "Проверка API. Верни wait, пустой target_id, duration=1 и короткое say.", probe), DECISION_TIMEOUT)
-                checks = ["Формат действий: OK"]
+                await decide(state.client, provider, settings.model, key,
+                             "Проверка API. Верни wait, пустой target_id, duration=1 и короткое say.", probe)
+                return ["Формат действий: OK"]
+        state.planner.interrupt_planning()
+        state.cancel_chat()
+        task = asyncio.create_task(perform_check())
+        state.check_task = task
+        try:
+            checks = await asyncio.wait_for(task, OLLAMA_DECISION_TIMEOUT if provider == "ollama" else DECISION_TIMEOUT)
+        except asyncio.CancelledError:
+            if revision != state.revision: raise HTTPException(409, "Проверка модели отменена") from None
+            raise
         except (ProviderError, TimeoutError) as exc:
             message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
             if provider == "openai" and isinstance(exc, ProviderError) and exc.diagnostic:
                 message += " Ответ API: " + exc.diagnostic
             raise HTTPException(502, message) from None
-        if state.provider == provider and state.model == settings.model and state.keys[provider] == key:
+        finally:
+            if state.check_task is task: state.check_task = None
+        if revision != state.revision: raise HTTPException(409, "Проверка модели отменена")
+        if (state.provider == provider and state.model == settings.model
+                and (state.ollama_url == base if provider == "ollama" else state.keys[provider] == key)):
             state.provider_error = None
             state.chat_suspended = False
         return {"ok": True, "model": settings.model, "checks": checks}
@@ -273,8 +356,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     async def configure(settings: ProviderSettings):
         if settings.provider != "offline" and not settings.model:
             raise HTTPException(422, "Укажите модель")
-        if settings.provider != "offline" and settings.api_key.get_secret_value():
+        if settings.provider in state.keys and settings.api_key.get_secret_value():
             state.keys[settings.provider] = settings.api_key.get_secret_value()
+        if settings.provider == "ollama": state.ollama_url = local_url(settings.ollama_url or state.ollama_url)
         state.retry_after = 0.0
         state.next_ai_request = 0.0
         state.request_interval_seconds = settings.request_interval_seconds
@@ -284,6 +368,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.model = settings.model
         state.revision += 1
         state.cancel_chat()
+        state.cancel_check()
         state.planner.reset()
         # Changing providers never implicitly starts control.
         state.command = Command(mode="stop", objective=state.command.objective)
@@ -295,11 +380,12 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if value.mode != "stop" and (state.last_snapshot is None or state.snapshot_error or time.monotonic() - state.last_seen >= CONNECTED_TIMEOUT):
             reason = state.snapshot_error["message"] if state.snapshot_error else "Сначала включите мод через F8 и дождитесь данных персонажа в панели"
             raise HTTPException(409, reason)
-        if value.mode == "ai" and not state.keys.get(state.provider):
+        if value.mode == "ai" and not state.ready:
             raise HTTPException(409, "Сначала выберите провайдера и добавьте API-ключ")
         state.command = value
         state.revision += 1
         state.cancel_chat()
+        state.cancel_check()
         state.planner.reset()
         state.next_ai_request = 0
         state.event("operator", {"stop": "Стоп", "follow": "Следовать за лидером", "ai": value.objective}[value.mode])
@@ -319,7 +405,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 state.planner.interrupt_planning()
                 state.next_ai_request = 0
             return {"handled": False, "queued": True, "mode": "ignore", "objective": "", "reply": ""}
-        if not state.keys.get(state.provider) or state.chat_busy or state.chat_suspended:
+        if not state.ready or state.chat_busy or state.chat_suspended or state.check_task is not None:
             return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
         # A listener may classify while native following/manual control continues.
         # It returns an intention only; the mod's command epoch decides whether to
@@ -336,13 +422,13 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             async def classify():
                 if delay > 0: await asyncio.sleep(delay)
                 state.next_ai_request = time.monotonic() + state.request_interval_seconds
-                return await decide(state.client, state.provider, state.model, state.keys[state.provider],
+                return await state.decide(
                     "Классифицируй обращение к помощнику по контексту. Текущий режим: " + state.command.mode +
                     "; задача: " + state.command.objective + ". Не управляй персонажем: steps=[wait].", probe,
                     planning=True, chat=tuple({**m,"pending":m["id"]==line["id"]} for m in state.chat_history))
             chat_task = asyncio.create_task(classify())
             state.chat_task = chat_task
-            result = await asyncio.wait_for(chat_task, DECISION_TIMEOUT)
+            result = await asyncio.wait_for(chat_task, state.decision_timeout)
             intent = result.chat_intent if isinstance(result, Plan) else None
             if revision != state.revision or intent is None or intent.message_id != line["id"] or not intent.addressed:
                 return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
@@ -353,7 +439,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise
         except (ProviderError, TimeoutError) as exc:
             if isinstance(exc, (ProviderUnavailable, TimeoutError)): state.retry_after = time.monotonic() + 15
-            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited)):
+            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)):
                 state.chat_suspended = True
                 state.provider_error = {"provider":state.provider,"model":state.model,"message":str(exc),"detail":exc.diagnostic}
             state.event("chat", str(exc) if isinstance(exc, ProviderError) else "Время ожидания контекстного обращения истекло")
@@ -414,22 +500,21 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 source = "fallback"
             elif time.monotonic() < state.next_ai_request:
                 result = wait("Пауза между решениями API; следование без AI доступно без паузы")
+            elif state.check_task is not None:
+                result = wait("Выполняется проверка модели")
             elif state.busy:
                 result = wait("Предыдущий запрос ещё выполняется")
-            elif not state.keys.get(state.provider):
+            elif not state.ready:
                 result = wait("Не задан API-ключ")
             else:
                 state.busy = True
                 api_attempted = True
                 state.next_ai_request = time.monotonic() + state.request_interval_seconds
                 try:
-                    result = await asyncio.wait_for(decide(
-                        state.client, state.provider, state.model, state.keys[state.provider],
-                        state.command.objective, snapshot,
-                    ), timeout=DECISION_TIMEOUT)
+                    result = await asyncio.wait_for(state.decide(state.command.objective, snapshot), timeout=state.decision_timeout)
                     source = state.provider
                 except (ProviderError, TimeoutError) as exc:
-                    stop_for_api_error = isinstance(exc, (ProviderModelNotFound, ProviderRateLimited))
+                    stop_for_api_error = isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError))
                     if isinstance(exc, ProviderUnavailable):
                         state.retry_after = time.monotonic() + 15
                     message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
@@ -447,6 +532,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             if api_attempted:
                 state.provider_error = api_error
             if stop_for_api_error:
+                state.chat_suspended = True
                 state.command = Command(mode="stop", objective=state.command.objective)
                 state.revision += 1
                 result = wait("AI остановлен. " + result.say)

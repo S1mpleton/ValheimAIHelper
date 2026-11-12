@@ -5,8 +5,8 @@ import time
 import uuid
 
 from .protocol import Action, Decision, Plan, validate_decision, wait
-from .providers import (decide, DECISION_TIMEOUT, ProviderError, ProviderUnavailable,
-                        ProviderModelNotFound, ProviderRateLimited)
+from .providers import (ProviderError, ProviderUnavailable,
+                        ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)
 
 IDLE_OBJECTIVE = "Поручение выполнено. Вернись к лидеру, помогай ему выживать, поддерживай еду, отдых и снаряжение. Ожидай новых поручений; не повторяй завершённый сброс, крафт или ответ."
 
@@ -21,12 +21,14 @@ class Planner:
         self.history: deque[str] = deque(maxlen=8)
         self.combat_policy = "defend"
         self.successful_steps = 0
+        self.execution_epoch = 0
 
     def interrupt_planning(self):
         if self.task is not None: self.task.cancel()
         self.task = None
 
     def reset(self):
+        self.execution_epoch += 1
         if self.task is not None:
             self.task.cancel()
         self.task = None
@@ -46,12 +48,17 @@ class Planner:
         state = self.state
         pending_ids = {m["id"] for m in state.pending_chat}
         chat = tuple({**m,"pending":m["id"] in pending_ids} for m in state.chat_history)
+        execution_epoch = self.execution_epoch
         try:
-            result = await asyncio.wait_for(decide(
-                state.client, state.provider, state.model, state.keys[state.provider],
+            result = await asyncio.wait_for(state.decide(
                 state.command.objective, snapshot, planning=True, history=tuple(self.history), chat=chat,
-            ), DECISION_TIMEOUT)
+            ), state.decision_timeout)
             if revision != state.revision or session != state.session_id or state.command.mode != "ai":
+                return
+            if execution_epoch != self.execution_epoch:
+                # A slow answer based on pre-action inventory must not repeat
+                # the action that completed while the model was thinking.
+                state.event("planner", "Получен новый результат игрового действия; старый план отброшен, требуется свежий снимок")
                 return
             assert isinstance(result, Plan)
             intent = result.chat_intent
@@ -79,6 +86,7 @@ class Planner:
             self.combat_policy = result.combat_policy
             self._next_id()
             state.provider_error = None
+            state.chat_suspended = False
             state.event(state.provider, "План: " + " → ".join(s.say or s.action.value for s in result.steps))
         except asyncio.CancelledError:
             raise
@@ -88,9 +96,10 @@ class Planner:
             message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
             state.provider_error = {"provider": state.provider, "model": state.model, "message": message,
                                     "detail": exc.diagnostic if isinstance(exc, ProviderError) else ""}
-            if isinstance(exc, ProviderUnavailable):
+            if isinstance(exc, (ProviderUnavailable, TimeoutError)):
                 state.retry_after = time.monotonic() + 15
-            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited)):
+            if isinstance(exc, (ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError)):
+                state.chat_suspended = True
                 state.command = state.command.model_copy(update={"mode": "stop"})
                 state.revision += 1
                 self.steps.clear()
@@ -120,6 +129,7 @@ class Planner:
                 self.history.append((step.action.value + ": " + outcome)[:240])
                 state.event("motor", self.history[-1])
                 if terminal and snapshot.action_status == "success" and step.action not in (Action.WAIT, Action.FOLLOW): self.successful_steps += 1
+                if step.action not in (Action.WAIT, Action.FOLLOW): self.execution_epoch += 1
                 if terminal and snapshot.action_status == "success" and step.action == Action.SPEAK:
                     state.chat_history.append({"id":0,"speaker":"assistant","text":step.text,"explicit_address":False})
                 self.steps.popleft()
@@ -127,8 +137,9 @@ class Planner:
                 if (terminal and snapshot.action_status == "blocked") or not terminal:
                     self.steps.clear()
                 self._next_id()
-        if (self.task is None and not state.chat_busy and now >= max(state.next_ai_request, state.retry_after)
-                and state.keys.get(state.provider)):
+        can_replan = not self.steps or (len(self.steps) == 1 and self.steps[0].action in (Action.WAIT, Action.FOLLOW)) or bool(state.pending_chat)
+        if (can_replan and self.task is None and not state.chat_busy and state.check_task is None and now >= max(state.next_ai_request, state.retry_after)
+                and state.ready):
             state.next_ai_request = now + state.request_interval_seconds
             self.task = asyncio.create_task(self._plan(snapshot, state.revision, state.session_id))
         if self.steps:

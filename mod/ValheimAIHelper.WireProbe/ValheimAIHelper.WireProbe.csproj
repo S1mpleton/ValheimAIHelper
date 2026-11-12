@@ -11,5 +11,6 @@
     <Compile Include="../ValheimAIHelper/ObservationValues.cs" Link="ObservationValues.cs" />
     <Compile Include="../ValheimAIHelper/BridgeUiProtocol.cs" Link="BridgeUiProtocol.cs" />
     <Compile Include="../ValheimAIHelper/Capabilities.cs" Link="Capabilities.cs" />
+    <Compile Include="../ValheimAIHelper/AiProviders.cs" Link="AiProviders.cs" />
   </ItemGroup>
 </Project>

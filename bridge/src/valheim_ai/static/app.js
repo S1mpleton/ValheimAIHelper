@@ -14,7 +14,7 @@ async function api(path, body) {
     method: body === undefined ? "GET" : "POST",
     headers: {"Authorization": `Bearer ${bridgeToken}`, ...(body === undefined ? {} : {"Content-Type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)}),
-    signal: AbortSignal.timeout(110000)
+    signal: AbortSignal.timeout(path === "/api/check/ollama" ? 310000 : 110000)
   });
   const data = await response.json();
   if (!response.ok) {
@@ -41,7 +41,13 @@ function clearGeminiModels() {
 }
 function providerFields() {
   const p = $("provider").value;
-  $("gemini-model-controls").hidden = p !== "gemini";
+  $("gemini-model-controls").hidden = p === "offline";
+  $("ollama-fields").hidden = p !== "ollama";
+  $("cloud-key-fields").hidden = p === "ollama" || p === "offline";
+  $("models-label").textContent = p === "ollama" ? "Установленные локальные модели" : "Модели провайдера";
+  $("check-hint").textContent = p === "ollama" ? "Проверка локального JSON-плана; первая загрузка может занять до 5 минут. Стоп/F9 отменяет ожидание. Данные игры не отправляются." : "Проверка выполняет короткие запросы и может расходовать квоту API. Данные игры не отправляются.";
+  $("provider-hint").textContent = p === "ollama" ? "AI выполняется локально без облачных токенов. Скорость зависит от модели и ресурсов ПК." : "Ключ оплачивается по тарифам API. Подписка ChatGPT или Gemini не заменяет API-ключ.";
+  $("interval-hint").textContent = p === "ollama" ? "Интервал ограничивает нагрузку на ПК. Движение персонажа продолжается между решениями модели." : "20 секунд — около 3 решений в минуту. Повторы и ручные проверки тоже расходуют квоту.";
   $("model").required = p !== "offline";
   $("model").disabled = p === "offline";
   $("api-key").disabled = p === "offline";
@@ -59,7 +65,7 @@ async function refresh() {
     const ready = s.connected && !s.snapshot_error;
     $("ai-start").disabled = !ready;
     $("follow").disabled = !ready;
-    $("mode").textContent = `Режим: ${{stop: "стоп", follow: "следование без AI", ai: "AI"}[s.mode]}${s.provider !== "offline" ? ` · ${s.provider === "gemini" ? "Gemini" : "OpenAI"} · ${s.model}` : ""}`;
+    $("mode").textContent = `Режим: ${{stop: "стоп", follow: "следование без AI", ai: "AI"}[s.mode]}${s.provider !== "offline" ? ` · ${{gemini:"Gemini",openai:"OpenAI",ollama:"Ollama"}[s.provider]} · ${s.model}` : ""}`;
     $("actor").textContent = s.actor
       ? `${s.actor.name} · здоровье ${Math.round(s.actor.health)}/${Math.round(s.actor.max_health)} · выносливость ${Math.round(s.actor.stamina)} · предметов в инвентаре: ${s.actor.inventory.length}`
       : "Ждём наблюдение из игры…";
@@ -82,7 +88,8 @@ $("pair-form").addEventListener("submit", async e => {
     const s = await api("/api/status");
     lastStatus = s;
     $("provider").value = s.provider === "offline" ? "openai" : s.provider;
-    $("model").value = s.model || (s.provider === "gemini" ? "" : "gpt-4.1-mini");
+    $("model").value = s.model || (s.provider === "openai" ? "gpt-4.1-mini" : "");
+    $("ollama-url").value = s.ollama_url || "http://127.0.0.1:11434";
     $("api-interval").value = s.request_interval_seconds;
     providerFields();
     clearGeminiModels();
@@ -92,22 +99,27 @@ $("pair-form").addEventListener("submit", async e => {
     await refresh();
   } catch (error) { notice(error.message, true); }
 });
-$("provider").addEventListener("change", () => {
+$("provider").addEventListener("change", async () => {
   const p = $("provider").value;
   clearGeminiModels();
   $("model").value = p === "openai" ? "gpt-4.1-mini" : "";
   providerFields();
   $("api-key").value = "";
   keyStatus();
+  if (bridgeToken) {
+    try { await api("/api/command", {mode:"stop"}); }
+    catch (error) { notice(error.message, true); }
+  }
 });
 $("provider-form").addEventListener("submit", async e => {
   e.preventDefault();
   const key = $("api-key").value.trim();
   $("api-key").value = "";
   try {
-    await api("/api/provider", {provider: $("provider").value, model: $("model").value.trim(), api_key: key,
+    await api("/api/provider", {provider: $("provider").value, model: $("model").value.trim(), api_key: $("provider").value === "ollama" ? "" : key,
+      ollama_url: $("ollama-url").value.trim(),
       request_interval_seconds: Number($("api-interval").value)});
-    notice("Настройки применены. Ключ будет проверен первым запросом AI из игры. Управление остановлено.");
+    notice("Настройки применены. Проверьте выбранную модель и включите AI. Управление остановлено.");
     await refresh();
   } catch (error) { notice(error.message, true); }
 });
@@ -120,7 +132,7 @@ async function command(mode) {
   }
   try {
     await api("/api/command", {mode, objective: $("objective").value});
-    notice(mode === "ai" ? "AI включён. Каждый цикл обращается к API и может расходовать баланс." : mode === "follow" ? "Следование включено без запросов к API." : "Стоп отправлен. F9 в игре немедленно отключает мод.");
+    notice(mode === "ai" ? $("provider").value === "ollama" ? "AI включён: локальная Ollama, без облачных токенов." : "AI включён. Запросы могут расходовать баланс API." : mode === "follow" ? "Следование включено без запросов к API." : "Стоп отправлен. F9 в игре немедленно отключает мод.");
     await refresh();
   } catch (error) { notice(error.message, true); }
 }
@@ -130,6 +142,7 @@ $("stop").addEventListener("click", () => command("stop"));
 setInterval(refresh, 2000);
 
 $("api-key").addEventListener("input", clearGeminiModels);
+$("ollama-url").addEventListener("input", clearGeminiModels);
 $("model").addEventListener("input", () => {
   $("gemini-model-choice").value = $("model").value.trim();
 });
@@ -144,17 +157,18 @@ $("check-model").addEventListener("click", async () => {
   const model = $("model").value.trim();
   if (!model) { notice("Сначала выберите модель или введите её API-имя.", true); return; }
   const key = $("api-key").value.trim();
+  const provider = $("provider").value;
   const revision = modelListRevision;
   const button = $("check-model");
   button.disabled = true;
-  notice(`Проверяю Gemini / ${model}…`);
+  notice(`Проверяю ${provider} / ${model}…${provider === "ollama" ? " Первая загрузка может занять до 5 минут." : ""}`);
   try {
-    const result = await api("/api/check/gemini", {model, api_key: key});
-    if (revision === modelListRevision && $("model").value.trim() === model && $("provider").value === "gemini") {
-      notice(`Gemini / ${model}: проверка прошла. ${result.checks.join("; ")}. Примените настройки, затем включите AI.`);
+    const result = await api(`/api/check/${provider}`, {model, api_key: provider === "ollama" ? "" : key, ollama_url:$("ollama-url").value.trim()});
+    if (revision === modelListRevision && $("model").value.trim() === model && $("provider").value === provider) {
+      notice(`${provider} / ${model}: проверка прошла. ${result.checks.join("; ")}. Примените настройки, затем включите AI.`);
     }
   } catch (error) {
-    if (revision === modelListRevision && $("model").value.trim() === model && $("provider").value === "gemini") {
+    if (revision === modelListRevision && $("model").value.trim() === model && $("provider").value === provider) {
       notice(`Проверка ${model}: ${error.message}`, true);
     }
   }
@@ -166,10 +180,11 @@ $("load-models").addEventListener("click", async () => {
   button.disabled = true;
   const revision = ++modelListRevision;
   const key = $("api-key").value.trim();
+  const provider = $("provider").value;
   $("models-hint").textContent = "Получаю список моделей…";
   try {
-    const data = await api("/api/models/gemini", {api_key: key});
-    if (revision !== modelListRevision || $("provider").value !== "gemini") return;
+    const data = await api(`/api/models/${provider}`, {api_key: provider === "ollama" ? "" : key, ollama_url:$("ollama-url").value.trim()});
+    if (revision !== modelListRevision || $("provider").value !== provider) return;
     const placeholder = document.createElement("option");
     placeholder.value = ""; placeholder.textContent = data.models.length ? "Выберите модель из списка" : "Доступные модели не найдены";
     $("gemini-model-choice").replaceChildren(placeholder, ...data.models.map(model => {
@@ -180,7 +195,7 @@ $("load-models").addEventListener("click", async () => {
     const current = $("model").value.trim();
     const found = data.models.includes(current);
     $("gemini-model-choice").value = found ? current : "";
-    const message = !data.models.length ? "API не вернул моделей с generateContent."
+    const message = !data.models.length ? provider === "ollama" ? "В Ollama нет локальных моделей. Загрузите текстовую модель через Ollama и обновите список." : "Провайдер не вернул доступных моделей."
       : current && !found ? `Модели «${current}» нет в полученном списке. Выберите другое имя и примените настройки.`
       : `Получено моделей: ${data.models.length}. Выберите модель в списке и примените настройки.`;
     $("models-hint").textContent = message;

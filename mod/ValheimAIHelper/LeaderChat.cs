@@ -59,7 +59,7 @@ public sealed partial class Plugin
         bool addressed = LeaderCommand.Addressed(text, Player.m_localPlayer.GetPlayerName(), out string command);
         if (!addressed)
         {
-            if (plugin.HasKey(plugin.uiProvider))
+            if (plugin.CanInferChat)
             {
                 plugin.QueueChat(speaker!, text);
             }
@@ -83,7 +83,7 @@ public sealed partial class Plugin
         string mode = normalized is "следуй" or "следуй за мной" or "за мной" or "follow" ? "follow" : "ai";
         if (mode == "follow" && speaker == Player.m_localPlayer)
         { plugin.ChatReply("Выберите другого игрока лидером: следовать за собой невозможно."); return; }
-        if (mode == "ai" && plugin.active && plugin.requestedMode == "ai" && plugin.HasKey(plugin.uiProvider))
+        if (mode == "ai" && plugin.active && plugin.requestedMode == "ai" && plugin.CanInferChat)
         {
             plugin.QueueChat(speaker, text, true);
             return;
@@ -103,7 +103,7 @@ public sealed partial class Plugin
                 if (!QueuedSpeaker(request)) continue;
                 LeaderChatReply? reply = null;
                 yield return uiClient.Request<LeaderChatReply>("/api/chat", request, value => reply = value,
-                    error => AddLog("chat", error));
+                    error => AddLog("chat", error), AiProviders.UiTimeout(uiProvider));
                 if (!allowChat.Value || epoch != uiOperation || reply == null || !reply.handled || !QueuedSpeaker(request)) continue;
                 if (reply.mode == "stop") { StopFromPanel(); if (reply.reply.Length > 0) ChatReply(reply.reply); }
                 else if (reply.mode is "task" or "follow")

@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.2.0</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.5.0</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
   <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
@@ -22,20 +22,21 @@
         <h2>02 · Ассистент</h2>
         <form id="provider-form">
           <label for="provider">Провайдер</label>
-          <select id="provider"><option value="openai">OpenAI / GPT</option><option value="gemini">Google Gemini</option><option value="offline">Без нейросети</option></select>
-          <label for="model">API-имя модели</label><input id="model" value="gpt-4.1-mini" maxlength="100" placeholder="Выберите из списка или введите API-имя" required>
+          <select id="provider"><option value="openai">OpenAI / GPT</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama · локально</option><option value="offline">Без нейросети</option></select>
+          <div id="ollama-fields" hidden><label for="ollama-url">Адрес Ollama на этом ПК</label><input id="ollama-url" value="http://127.0.0.1:11434" maxlength="256"><p class="hint">Запустите Ollama и загрузите текстовую модель. API-ключ не нужен. Размышления отключены (think=false).</p></div>
+          <label for="model">Имя модели</label><input id="model" value="gpt-4.1-mini" maxlength="200" placeholder="Выберите из списка или введите точное имя" required>
           <div id="gemini-model-controls" hidden>
-            <button id="load-models" type="button" class="secondary">Получить модели Gemini</button>
-            <label for="gemini-model-choice">Модели из API Google</label>
+            <button id="load-models" type="button" class="secondary">Получить модели</button>
+            <label id="models-label" for="gemini-model-choice">Модели провайдера</label>
             <select id="gemini-model-choice" disabled><option value="">Сначала получите список моделей</option></select>
             <p id="models-hint" class="hint">После выбора модели нажмите «Применить настройки».</p>
             <button id="check-model" type="button" class="secondary">Проверить выбранную модель</button>
-            <p class="hint">Проверка получает карточку модели и выполняет два коротких запроса генерации. Может расходовать баланс API. Данные игры не отправляются.</p>
+            <p id="check-hint" class="hint">Проверка выполняет короткий запрос. Данные игры не отправляются.</p>
           </div>
-          <label for="api-key">API-ключ <span id="key-status"></span></label><input id="api-key" type="password" autocomplete="off" placeholder="Хранится только в памяти сервиса">
-          <label for="api-interval">Пауза между решениями API, секунды</label><input id="api-interval" type="number" value="20" min="4" max="300" step="1" required>
-          <p class="hint">20 секунд — около 3 решений в минуту. Повторы и ручные проверки тоже расходуют квоту. «Просто следовать» работает без API.</p>
-          <p class="hint">Ключ оплачивается по тарифам API. Подписка ChatGPT или Gemini не заменяет API-ключ. Состояние мира отправляется выбранному провайдеру при включении AI.</p>
+          <div id="cloud-key-fields"><label for="api-key">API-ключ <span id="key-status"></span></label><input id="api-key" type="password" autocomplete="off" placeholder="Хранится только в памяти сервиса"></div>
+          <label for="api-interval">Интервал решений AI, секунды</label><input id="api-interval" type="number" value="20" min="4" max="300" step="1" required>
+          <p id="interval-hint" class="hint">20 секунд — около 3 решений в минуту. «Просто следовать» работает без нейросети.</p>
+          <p id="provider-hint" class="hint">Состояние мира отправляется выбранному провайдеру при включении AI.</p>
           <button>Применить настройки</button>
         </form>
       </section>
@@ -48,9 +49,9 @@
       </section>
     </div>
     <section class="world"><h2>Персонаж</h2><p id="bridge-error" role="alert" hidden></p><p id="actor">Ждём наблюдение из игры…</p><p class="hint">Если «Не подключён», проверьте: игра запущена, персонаж в мире, мод включён через F8, коды сопряжения совпадают. Закройте панель F8, чтобы разрешить движение.</p></section>
-    <section><h2>Последние решения</h2><p class="hint">Ответы ассистента видны только здесь и в панели мода. Сообщения в игровой чат не отправляются.</p><ol id="events" aria-live="polite"></ol></section>
+    <section><h2>Последние решения</h2><p class="hint">Планы, результаты действий и ошибки. Короткие ответы помощника могут появляться в игровом чате.</p><ol id="events" aria-live="polite"></ol></section>
   </div>
-  <footer>Сейчас доступны: следование, ожидание, подбор с земли, еда, экипировка и ближний бой с врагами. Строительство, добыча, крафт, сундуки, порталы и возрождение требуют человека.</footer>
+  <footer>Провайдеры: локальная Ollama, OpenAI и Gemini. Управление, подключения и журнал также доступны прямо в игровом меню. F9 — немедленный стоп.</footer>
 </main>
 </body>
 </html>

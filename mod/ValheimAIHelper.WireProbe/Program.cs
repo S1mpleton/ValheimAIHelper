@@ -20,6 +20,18 @@ if (args.Length > 1 && args[0] == "--check-game-access")
     Console.WriteLine("GAME_ACCESS_OK: no direct reference to protected GetRightItem"); return 0;
 }
 if (args.Length > 0 && args[0] == "--capabilities") { Console.WriteLine(WireJson.Serialize(Capabilities.All)); return 0; }
+if (args.Length > 0 && args[0] == "--ui-ollama")
+{
+    Console.WriteLine(WireJson.Serialize(new ProviderOptions { provider="ollama",model="wire-agent:Q4",ollama_url="http://127.0.0.1:11434" })); return 0;
+}
+if (args.Length > 0 && args[0] == "--read-ollama-status")
+{
+    var state = WireJson.Deserialize<BridgeUiStatus>(Console.In.ReadToEnd());
+    if (state.provider!="ollama" || !state.provider_ready || state.model!="wire-agent:Q4") return 1;
+    Console.WriteLine("OLLAMA_STATUS_OK"); return 0;
+}
+if (args.Length > 0 && args[0] == "--ollama-ui-timeout")
+{ Console.WriteLine(AiProviders.UiTimeout("ollama")); return 0; }
 if (args.Length > 0 && args[0] == "--ui-chat")
 {
     Console.WriteLine(WireJson.Serialize(new LeaderChatRequest { actor_name = "Бъерн", speaker = "Лидер", text = "И ещё подбери камни" })); return 0;

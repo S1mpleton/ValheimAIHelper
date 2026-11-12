@@ -10,7 +10,7 @@ FIELDS = frozenset({
     "carry_weight", "max_carry_weight", "free_slots", "comfort", "sheltered", "rested", "wet", "cold", "attached", "sitting", "eitr",
     "station_id", "status_effects", "guardian_power", "guardian_cooldown", "state", "targeting_us", "targeting_leader", "attacking",
     "recipes", "requirements", "craftable", "station", "amount", "build_options", "available", "container_id", "container_inventory",
-    "daylight", "weather", "background_planning", "listen_chat", "plan_id", "action_status", "recent_events", "actor_name", "speaker", "text", "explicit_address",
+    "daylight", "weather", "background_planning", "listen_chat", "plan_id", "action_status", "recent_events", "actor_name", "speaker", "text", "explicit_address", "ollama_url",
 })
 
 

@@ -133,6 +133,7 @@ def gemini_error_message(error: ProviderError) -> str:
 # Three 30-second attempts plus 2s/4s backoff fit inside the bridge budget.
 API_TIMEOUT = 30
 DECISION_TIMEOUT = 100
+OLLAMA_DECISION_TIMEOUT = 300
 CONNECTED_TIMEOUT = 180
 RETRY_DELAYS = (2, 4)
 
@@ -143,6 +144,10 @@ class ProviderUnavailable(ProviderError):
 
 class ProviderRateLimited(ProviderError):
     """Automatic AI requests must stop until the operator checks the quota."""
+
+
+class ProviderLocalConfigurationError(ProviderError):
+    """A local model cannot run as configured; do not repeatedly reload it."""
 
 
 class ProviderModelNotFound(ProviderError):
@@ -231,8 +236,24 @@ async def decide(
     objective: str,
     snapshot: Snapshot,
     *, planning: bool = False, history: tuple[str, ...] = (), chat: tuple[dict, ...] = (),
+    ollama_url: str = "http://127.0.0.1:11434",
 ) -> Decision | Plan:
-    observation = json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False)
+    data = snapshot.model_dump(mode="json", exclude_none=provider == "ollama", exclude_defaults=provider == "ollama")
+    if provider == "ollama":
+        # Bound local context without removing any inventory IDs. The full
+        # authoritative snapshot is still used for validation below.
+        data["entities"] = sorted(data.get("entities", []), key=lambda e: (e.get("id") != snapshot.leader_id, e.get("kind") != "enemy", e.get("distance", 0)))[:32]
+        for field, limit in (("recipes", 12), ("build_options", 16)):
+            if field in data: data[field] = data[field][:limit]
+        data["actor"].update(max_stamina=snapshot.actor.max_stamina, max_carry_weight=snapshot.actor.max_carry_weight)
+        for values, originals in ((data["actor"].get("inventory", []), snapshot.actor.inventory),
+                                  (data.get("container_inventory", []), snapshot.container_inventory)):
+            for item, original in zip(values, originals):
+                item.update(durability=original.durability, quality=original.quality, max_quality=original.max_quality)
+                if original.food: item["can_eat"] = original.can_eat
+        for recipe, original in zip(data.get("recipes", []), snapshot.recipes): recipe["amount"] = original.amount
+        history, chat = history[-4:], chat[-6:]
+    observation = json.dumps(data, ensure_ascii=False, separators=(",", ":") if provider == "ollama" else None)
     # Keep operator instructions separate from untrusted observations.
     prompt = SYSTEM_PROMPT + MECHANICS_GUIDE + ("\nReturn a plan of 1..6 ordered steps. Use combat_policy=avoid when the leader asks "
                              "to avoid fighting, otherwise defend. Avoid plans must not attack, hunt or secondary_attack. Put preparation before combat/follow. "
@@ -260,7 +281,25 @@ async def decide(
     ]
     schema = strict_schema(Plan if planning else Decision)
     try:
-        if provider == "openai":
+        if provider == "ollama":
+            from .ollama import generate
+            schema = strict_schema(Plan if planning else Decision)
+            schema.get("$defs", {}).get("Action", {})["enum"] = list(dict.fromkeys(["wait", *snapshot.supported_actions]))
+            messages[0]["content"] += ("\nFor this local model return only a compact JSON object. Use 1..3 steps. "
+                "Some nearby lists are shortened; never conclude an item does not exist merely because it is absent. "
+                "Omitted optional flags are false; empty lists may be omitted. "
+                "Execute an immediately available requested action before optional chores or waiting. "
+                "Always fill amount explicitly: for drop/take/deposit/use_on it is the requested item count, "
+                "not the number of actions. If the operator asks for five items, use amount=5 in one action. "
+                "previous_result is an outcome, never a new objective. "
+                + ('The response object contains steps, chat_intent, combat_policy and objective_complete. Each step contains action, target_id, duration and say, plus needed arguments.' if planning
+                   else 'The response object contains action, target_id, duration and say, plus needed arguments.'))
+            # Small local models benefit from the operator goal after the data,
+            # instead of copying the last observed status as their new task.
+            messages = [messages[0], messages[2], {"role":"user","content":"User objective: " + objective +
+                "\nApply any addressed pending chat first; otherwise execute this objective using observed IDs. Return JSON only."}]
+            text = await generate(client, ollama_url, model, messages, schema)
+        elif provider == "openai":
             response = await request_api(client, "POST",
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": "Bearer " + api_key},
@@ -306,7 +345,7 @@ async def decide(
         return validate_decision(Decision.model_validate_json(text), snapshot)
     except ProviderModelNotFound as exc:
         # Never display the upstream body: it can include request data or credentials.
-        message = (
+        message = str(exc) if provider == "ollama" else (
             gemini_error_message(exc) if provider == "gemini" else
             "OpenAI: модель не найдена или недоступна (404). Проверьте API-имя модели и доступ проекта, затем примените настройки."
         )
