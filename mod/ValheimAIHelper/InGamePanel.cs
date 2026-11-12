@@ -8,6 +8,7 @@ namespace ValheimAIHelper;
 
 public sealed partial class Plugin
 {
+    private const string CompanionObjective = "Следуй за лидером и помогай ему выжить.";
     private BridgeUiClient? uiClient;
     private EscMenuIntegration? menuIntegration;
     private BridgeUiStatus? bridgeStatus;
@@ -16,7 +17,7 @@ public sealed partial class Plugin
     private string uiProvider = "gemini", uiModel = "", uiKey = "", uiObjective = "", uiInterval = "20";
     private string uiMessage = "", uiError = "";
     private string[] uiModels = Array.Empty<string>();
-    private bool uiBusy, uiPolling, uiHydrated, uiSettings, uiModelList, uiJournal;
+    private bool uiBusy, uiPolling, uiHydrated, uiSettings, uiModelList, uiJournal, uiAdditional;
     private float nextUiPoll;
     private int uiOperation;
     private string loggedUiError = "", lastStatusError = "";
@@ -29,7 +30,7 @@ public sealed partial class Plugin
     {
         savedProvider = Config.Bind("AI", "Provider", "openai", "AI provider. API keys are never saved here.");
         savedModel = Config.Bind("AI", "Model", "", "API model name selected in the game panel.");
-        savedObjective = Config.Bind("AI", "Objective", "Следуй за лидером и помогай ему выжить.", "Companion objective.");
+        savedObjective = Config.Bind("AI", "Objective", CompanionObjective, "Last chat objective; normal interaction uses the in-game chat.");
         savedApiInterval = Config.Bind("AI", "RequestInterval", 20, new ConfigDescription("Minimum seconds between AI decisions.", new AcceptableValueRange<int>(4, 300)));
         uiProvider = savedProvider.Value == "gemini" ? "gemini" : "openai";
         uiModel = savedModel.Value;
@@ -308,9 +309,9 @@ public sealed partial class Plugin
         if (uiError.Length > 0) GUILayout.Label(uiError, panelErrorStyle);
         else if (uiMessage.Length > 0) GUILayout.Label(uiMessage, statusStyle);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Персонаж", panelButtonStyle)) { uiSettings = uiJournal = false; }
-        if (GUILayout.Button("Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = false; }
-        if (GUILayout.Button("Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = false; }
+        if (GUILayout.Button((!uiSettings && !uiJournal ? "● " : "") + "Персонаж", panelButtonStyle)) { uiSettings = uiJournal = false; }
+        if (GUILayout.Button((uiSettings ? "● " : "") + "Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = false; }
+        if (GUILayout.Button((uiJournal ? "● " : "") + "Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = false; }
         GUILayout.EndHorizontal();
         if (uiJournal)
         {
@@ -322,28 +323,30 @@ public sealed partial class Plugin
             GUILayout.TextArea(journal.Text, GUILayout.MinHeight(230));
             if (GUILayout.Button("Перезапустить службу", panelButtonStyle)) { StopFromPanel(); StartLocalRuntime(); }
         }
+        else if (uiSettings) DrawConnectionSettings();
+        else if (uiAdditional)
+        {
+            if (GUILayout.Button("‹ Персонаж", panelButtonStyle)) uiAdditional = false;
+            GUILayout.Label("Дополнительно", titleStyle);
+            allowCombat.Value = GUILayout.Toggle(allowCombat.Value, "Разрешить бой и защиту лидера");
+            autoSurvival.Value = GUILayout.Toggle(autoSurvival.Value, "Автоматически есть доступную еду");
+            if (GUILayout.Button("Управление персонажем: " + (controlByAllPlayers.Value ? "Все игроки" : "Только лидер"), panelButtonStyle)) ToggleChatControlScope();
+            GUILayout.Label("Изменение доступа останавливает текущую задачу. Сообщения разрешённых игроков могут отправляться AI.", hintStyle);
+        }
         else
         {
         var leader = FindLeader();
         if (GUILayout.Button("Лидер: " + (leader ? leader!.GetPlayerName() : "не выбран") + " · сменить", panelButtonStyle)) SelectNextLeader();
-        allowCombat.Value = GUILayout.Toggle(allowCombat.Value, "Разрешить бой и защиту лидера");
-        autoSurvival.Value = GUILayout.Toggle(autoSurvival.Value, "Автоматически есть доступную еду");
-        allowChat.Value = GUILayout.Toggle(allowChat.Value, "Слушать обращения лидера в обычном чате");
-        GUILayout.Space(12);
-        GUILayout.Label("Что нужно сделать?", statusStyle);
-        uiObjective = GUILayout.TextArea(uiObjective, 1000, GUILayout.Height(70));
         GUI.enabled = !uiBusy;
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Следовать", panelButtonStyle)) StartCoroutine(StartMode("follow"));
-        if (GUILayout.Button("AI: выполнить задачу", panelButtonStyle)) StartCoroutine(StartMode("ai"));
+        if (GUILayout.Button("Включить AI", panelButtonStyle)) { uiObjective = CompanionObjective; StartCoroutine(StartMode("ai")); }
         GUI.enabled = true;
         if (GUILayout.Button("Стоп", panelButtonStyle)) StopFromPanel();
         GUILayout.EndHorizontal();
         GUILayout.Label("Следование не требует ключа и не расходует квоту. F9 — немедленный стоп.", hintStyle);
         GUILayout.Space(12);
-        string connection = uiModel.Length > 0 ? (uiProvider == "gemini" ? "Gemini" : "OpenAI") + " · " + uiModel : "Нейросеть не подключена";
-        if (GUILayout.Button((uiSettings ? "▼ " : "▶ ") + "Подключение: " + connection, panelButtonStyle)) uiSettings = !uiSettings;
-        if (uiSettings) DrawConnectionSettings();
+        if (GUILayout.Button("Дополнительно ›", panelButtonStyle)) uiAdditional = true;
         GUILayout.Label("Обратитесь по имени персонажа: «Бъерн, подбери камни». Продолжения без имени AI понимает по контексту.", hintStyle);
         }
         GUILayout.Space(10);

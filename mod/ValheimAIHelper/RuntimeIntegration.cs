@@ -19,7 +19,7 @@ public sealed partial class Plugin
     private void InitRuntime()
     {
         journal.RegisterSecret(bridgeToken.Value);
-        AddLog("version", "Valheim AI Helper 0.4.0; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
+        AddLog("version", "Valheim AI Helper 0.4.1; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
         if (!autoBridge.Value) { AddLog("service", "Автозапуск выключен в конфигурации; используется внешний мост."); return; }
         StartLocalRuntime();
     }
@@ -75,12 +75,12 @@ public sealed partial class Plugin
             if (events[i].id > lastEventId)
             {
                 AddLog(events[i].source, events[i].message); lastEventId = events[i].id;
-                if (events[i].source == "assistant" && allowChat.Value && FindLeader()) ChatReply(events[i].message);
+                if (events[i].source == "assistant" && allowChat.Value && Player.m_localPlayer) ChatReply(events[i].message);
             }
     }
-    private string Report() => journal.Redact("Valheim AI Helper 0.4.0\nValheim: " + global::Version.GetVersionString() +
+    private string Report() => journal.Redact("Valheim AI Helper 0.4.1\nValheim: " + global::Version.GetVersionString() +
         "\nMode: " + (active ? bridgeStatus?.mode ?? "connecting" : "manual") + "\nLeader: " + leaderName.Value +
-        "\nAI: " + uiProvider + " / " + uiModel + "\nCombat: " + allowCombat.Value + "; survival: " + autoSurvival.Value +
+        "\nAI: " + uiProvider + " / " + uiModel + "\nCombat: " + allowCombat.Value + "; survival: " + autoSurvival.Value + "; chat control: " + (controlByAllPlayers.Value ? "all players" : "leader only") +
         "\nStatus: " + status + "\nError: " + uiError + "\n\n" + journal.Text);
     private void CopyReport() { UnityEngine.GUIUtility.systemCopyBuffer = Report(); uiMessage = "Отчёт скопирован. Его можно отправить сообщением."; }
     private void SaveReport()

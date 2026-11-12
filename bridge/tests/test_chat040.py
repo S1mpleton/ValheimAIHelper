@@ -243,3 +243,21 @@ async def test_model_cannot_mark_request_completed_without_confirmed_action(snap
         await finish_plan(app,c,snapshot)
         assert app.state.bridge.command.objective=="Следуй и защищай"
         assert not any(e["source"]=="mission" for e in app.state.bridge.events)
+
+
+async def test_context_preserves_different_authorized_speakers_and_selects_message_by_id(snapshot):
+    async def provider(req):
+        context=json.loads(req.content)["messages"][-1]["content"].split("Leader conversation:\n",1)[1]
+        messages=json.loads(context)
+        assert [(m["speaker"],m["text"]) for m in messages]==[("Лидер","Обсуждаем погоду"),("Другой викинг","Бъерн, собери камни")]
+        return httpx.Response(200,json={"choices":[{"message":{"content":json.dumps({
+            "steps":[{"action":"wait","target_id":"","duration":1,"say":"Осматриваюсь"}],
+            "chat_intent":{"message_id":2,"addressed":True,"mode":"task","objective":"Собери камни","reply":"Соберу"}
+        })}}]})
+    async with client(provider) as (app,c):
+        await setup(c,snapshot)
+        await c.post("/api/chat",json={"actor_name":"Бъерн","speaker":"Лидер","text":"Обсуждаем погоду"})
+        await c.post("/api/chat",json={"actor_name":"Бъерн","speaker":"Другой викинг","text":"Бъерн, собери камни","explicit_address":True})
+        await finish_plan(app,c,snapshot)
+        assert app.state.bridge.command.objective=="Собери камни"
+        assert not app.state.bridge.pending_chat

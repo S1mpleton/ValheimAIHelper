@@ -17,6 +17,8 @@ async def main():
     project = ROOT / "mod/ValheimAIHelper.WireProbe/ValheimAIHelper.WireProbe.csproj"
     subprocess.run(["dotnet", "build", str(project), "-c", "Release", "--nologo", "--verbosity", "quiet"], check=True, timeout=60)
     program = project.parent / "bin/Release/net8.0/ValheimAIHelper.WireProbe.dll"
+    plugin = ROOT / "mod/ValheimAIHelper/bin/Release/net48/ValheimAIHelper.dll"
+    subprocess.run(["dotnet", str(program), "--check-game-access", str(plugin)], check=True, timeout=10)
     encoded = subprocess.check_output(["dotnet", str(program)], timeout=10)
     capabilities = json.loads(subprocess.check_output(["dotnet", str(program), "--capabilities"], timeout=10))
     assert set(capabilities) == {a.value for a in Action}, "Mod/bridge action catalog mismatch"

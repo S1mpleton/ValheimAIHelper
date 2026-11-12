@@ -222,7 +222,7 @@ internal sealed partial class ActionExecutor
         {
             if (!observation!.Interactables.TryGetValue(d.target_id, out var target) || !(target is Piece piece)) { Finish("Строение недоступно", false); return; }
             point = piece.transform.position;
-            selected = player.GetRightItem()?.m_shared.m_buildPieces?.m_pieces.Select(g => g.GetComponent<Piece>()).FirstOrDefault(p => p && p.m_repairPiece);
+            selected = NativeAccess.HeldItem(player)?.m_shared.m_buildPieces?.m_pieces.Select(g => g.GetComponent<Piece>()).FirstOrDefault(p => p && p.m_repairPiece);
         }
         if (!selected || !player.InPlaceMode()) { Finish("Экипируйте молот/культиватор; нужный режим инструмента недоступен", false); return; }
         if (Vector3.Distance(player.transform.position, point) > 5) { MoveTo(player, point, 3.5f); return; }

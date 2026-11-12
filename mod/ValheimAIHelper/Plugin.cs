@@ -10,12 +10,12 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.4.0")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.4.1")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
     private ConfigEntry<string> bridgeUrl = null!, bridgeToken = null!, leaderName = null!;
-    private ConfigEntry<bool> allowCombat = null!, autoSurvival = null!, autoBridge = null!, allowChat = null!;
+    private ConfigEntry<bool> allowCombat = null!, autoSurvival = null!, autoBridge = null!, allowChat = null!, controlByAllPlayers = null!;
     private ConfigEntry<float> interval = null!;
     private readonly ActionExecutor executor = new();
     private static Plugin? instance;
@@ -44,6 +44,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         allowCombat = Config.Bind("Player", "AllowCombat", true, "Allow combat and immediate defence against hostile monsters. Visible in the game panel.");
         autoSurvival = Config.Bind("Player", "AutoSurvival", true, "Use available food through native inventory actions.");
         allowChat = Config.Bind("Player", "LeaderChat", true, "Accept ordinary chat from the selected leader; character name explicitly addresses the helper. Chat context is sent to the configured AI.");
+        controlByAllPlayers = Config.Bind("Player", "ControlByAllPlayers", false, "Chat control: false = selected leader only; true = all other players. Network sender identity is always checked.");
         autoBridge = Config.Bind("Bridge", "AutoStart", true, "Automatically start the bundled local service on Windows.");
         interval = Config.Bind("Bridge", "DecisionInterval", 1f, new ConfigDescription("Seconds between game observations; AI request cost is controlled separately by AI.RequestInterval.", new AcceptableValueRange<float>(.5f, 2f)));
         instance = this;
@@ -212,7 +213,12 @@ public sealed partial class Plugin : BaseUnityPlugin
                 observation.Data.supported_actions = Capabilities.Supported(allowCombat.Value, placementPatchReady);
                 payload = WireJson.Serialize(observation.Data);
             }
-            catch (Exception ex) { observation = null; status = "Ошибка наблюдения: " + ex.GetType().Name; executor.Stop(actor, status); AddLog("observation", status); }
+            catch (Exception ex)
+            {
+                observation = null; status = "Ошибка наблюдения: " + ex.GetType().Name;
+                executor.Stop(actor, status); AddLog("observation", ex.ToString());
+                Logger.LogWarning("Observation failed: " + ex);
+            }
             float started = Time.realtimeSinceStartup;
             if (observation != null)
             {

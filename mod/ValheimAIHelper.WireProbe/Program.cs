@@ -1,8 +1,24 @@
 using System;
+using System.IO;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using ValheimAIHelper;
 
 Console.OutputEncoding = new System.Text.UTF8Encoding(false);
 Console.InputEncoding = new System.Text.UTF8Encoding(false);
+if (args.Length > 1 && args[0] == "--check-game-access")
+{
+    using var file = File.OpenRead(args[1]);
+    using var pe = new PEReader(file);
+    var metadata = pe.GetMetadataReader();
+    foreach (var handle in metadata.MemberReferences)
+    {
+        var member = metadata.GetMemberReference(handle);
+        if (metadata.GetString(member.Name) == "GetRightItem")
+        { Console.Error.WriteLine("Inaccessible direct game call: Humanoid.GetRightItem (protected in the runtime)"); return 1; }
+    }
+    Console.WriteLine("GAME_ACCESS_OK: no direct reference to protected GetRightItem"); return 0;
+}
 if (args.Length > 0 && args[0] == "--capabilities") { Console.WriteLine(WireJson.Serialize(Capabilities.All)); return 0; }
 if (args.Length > 0 && args[0] == "--ui-chat")
 {

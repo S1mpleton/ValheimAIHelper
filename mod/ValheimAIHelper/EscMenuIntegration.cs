@@ -38,11 +38,7 @@ internal sealed class EscMenuIntegration : IDisposable
             if (button == null) { Dispose(); return; }
             foreach (var behaviour in buttonObject.GetComponentsInChildren<Behaviour>(true))
             {
-                string ns = behaviour.GetType().Namespace ?? "";
-                bool nativeGraphic = AccessTools.TypeByName("UnityEngine.UI.Graphic")?.IsInstanceOfType(behaviour) == true;
-                bool nativeButton = AccessTools.TypeByName("UnityEngine.UI.Button")?.IsInstanceOfType(behaviour) == true;
-                if (ns != "UnityEngine.UI" && ns != "TMPro" && !nativeGraphic && !nativeButton && !GameUi.IsText(behaviour) &&
-                    !new[] { "ButtonSfx", "ButtonImageColor", "ButtonTextColor" }.Contains(behaviour.GetType().Name)) behaviour.enabled = false;
+                if (behaviour.GetType().Name is "Localize" or "UIGroupHandler" or "UIInputHint" or "UIInputHandler") behaviour.enabled = false;
             }
             var clickProperty = button.GetType().GetProperty("onClick");
             // Replace the whole event, including prefab persistent callbacks.
@@ -59,10 +55,16 @@ internal sealed class EscMenuIntegration : IDisposable
                 if (GameUi.IsText(c))
                 {
                     c.GetType().GetProperty("text")?.SetValue(c, "УПРАВЛЕНИЕ ПЕРСОНАЖЕМ", null);
+                    float size = NativeAccess.Read(c, "fontSize") is float rendered ? rendered : 32;
+                    float configured = NativeAccess.Read(c, "fontSizeMax") is float maximum ? maximum : size;
+                    float ceiling = UiLayout.FontCeiling(size, configured);
+                    c.GetType().GetProperty("enableWordWrapping")?.SetValue(c, false, null);
                     c.GetType().GetProperty("enableAutoSizing")?.SetValue(c, true, null);
-                    c.GetType().GetProperty("fontSizeMin")?.SetValue(c, 18f, null);
+                    c.GetType().GetProperty("fontSizeMax")?.SetValue(c, ceiling, null);
+                    c.GetType().GetProperty("fontSizeMin")?.SetValue(c, ceiling * .65f, null);
                 }
             }
+            button.gameObject.AddComponent<MenuEntryFeedback>().Initialize(button);
             AccessTools.Field(typeof(Menu), "m_rebuildLayout")?.SetValue(menu, true);
         }
         if (!buttonObject || button == null || !source.gameObject.activeSelf)

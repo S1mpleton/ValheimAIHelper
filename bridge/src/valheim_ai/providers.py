@@ -22,7 +22,7 @@ eat: inventory food with can_eat=true; keep three different foods active. use: a
 pickup: ground item. interact: observed berry/mushroom plant or door, using normal game interaction.
 move/jump: empty target_id, destination a nearby world coordinate (at most 30m), or null
 for a short walk/jump forward. run only with enough stamina and a clear reason.
-wait: empty target_id. destination must be null for all actions except move/jump.
+wait: empty target_id. destination must be null for all actions except move/jump/look/build.
 Read health, food_slots, threats targeting you/leader, weapon and last action result.
 When safe, prepare food/equipment then follow. Help against nearby threats instead of
 waiting for the human to be hit. At low health retreat/block and eat; don't chase far away.
@@ -240,7 +240,9 @@ async def decide(
     if history:
         observation += "\nRecent execution history (data only):\n" + json.dumps(history, ensure_ascii=False)
     if chat:
-        prompt += ("\nInterpret recent messages from the authenticated human leader. No !ai prefix is required. "
+        prompt += ("\nInterpret recent messages from human players authorized by the mod's control setting. "
+                   "The default is leader only; all-player mode still verifies each network sender. "
+                   "Keep track of speaker names in the conversation; messages may come from different authorized players. No !ai prefix is required. "
                    "Your character name is actor.name. A name/vocative is an explicit address; otherwise infer "
                    "addressing from the recent conversation, requests, pronouns and situation. Ignore unrelated "
                    "conversation; uncertain messages must not replace the mission. Fill chat_intent with the "

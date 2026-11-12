@@ -129,7 +129,7 @@ internal sealed class Observation
         actor.GetGuardianPowerHUD(out _,out float guardianCooldown);
         o.Data.actor=new Actor {id="player:"+actor.GetPlayerID(),name=Name(actor.GetPlayerName()),position=Pos(origin),forward=Pos(actor.transform.forward),
             health=ObservationValues.Vital(actor.GetHealth()),max_health=maxHealth,stamina=ObservationValues.Vital(actor.GetStamina()),max_stamina=Mathf.Max(1,actor.GetMaxStamina()),
-            food_slots=Mathf.Min(3,actor.GetFoods().Count),weapon=Name((actor.GetRightItem()??actor.GetCurrentWeapon())?.m_shared.m_name??""),blocking=actor.IsBlocking(),
+            food_slots=Mathf.Min(3,actor.GetFoods().Count),weapon=Name((NativeAccess.HeldItem(actor)??actor.GetCurrentWeapon())?.m_shared.m_name??""),blocking=actor.IsBlocking(),
             swimming=actor.IsSwimming(),encumbered=actor.IsEncumbered(),biome=actor.GetCurrentBiome().ToString(),inventory=inventory.Select(i=>Item(actor,i)).ToArray(),
             carry_weight=ObservationValues.Vital(actor.GetInventory().GetTotalWeight()),max_carry_weight=Mathf.Max(1,actor.GetMaxCarryWeight()),
             free_slots=Mathf.Clamp(actor.GetInventory().GetWidth()*actor.GetInventory().GetHeight()-inventory.Length,0,256),comfort=Mathf.Clamp(actor.GetComfortLevel(),0,100),
@@ -145,7 +145,7 @@ internal sealed class Observation
         o.Data.recipes=recipes.Select(r=>new RecipeOption {id="recipe:"+r.r.GetInstanceID(),name=Name(r.r.m_item.m_itemData.m_shared.m_name),
             amount=Mathf.Clamp(r.r.m_amount,1,10000),craftable=r.can,station=Name(r.r.m_craftingStation?r.r.m_craftingStation.m_name:"inventory"),
             requirements=Requirements(r.r.m_resources)}).ToArray();
-        var table=actor.GetRightItem()?.m_shared.m_buildPieces;
+        var table=NativeAccess.HeldItem(actor)?.m_shared.m_buildPieces;
         var pieces=table!=null?table.m_pieces.Where(g=>g).Select(g=>g.GetComponent<Piece>()).Where(p=>p&&actor.IsPieceAvailable(p)).ToArray():Array.Empty<Piece>();
         pieces=pieces.OrderByDescending(p=>actor.HaveRequirements(p,Player.RequirementMode.CanBuild)).Take(32).ToArray();
         foreach(var p in pieces)o.Pieces["piece:"+p.GetInstanceID()]=p;

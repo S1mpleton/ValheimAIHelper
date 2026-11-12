@@ -21,14 +21,8 @@ internal static class NativeAccess
         }
         return null;
     }
-    public static object? Call(object target, string name, params object?[] args)
-    {
-        var method = target.GetType().GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
-            .FirstOrDefault(m => m.Name == name && m.GetParameters().Length == args.Length &&
-                m.GetParameters().Select((v, i) => args[i] == null || v.ParameterType.IsInstanceOfType(args[i])).All(v => v));
-        if (method == null) throw new MissingMethodException(target.GetType().Name, name);
-        return method.Invoke(target, args);
-    }
+    public static object? Call(object target, string name, params object?[] args) => NativeMethods.Call(target, name, args);
+    public static ItemDrop.ItemData? HeldItem(Player player) => Call(player, "GetRightItem") as ItemDrop.ItemData;
     public static GameObject? Object(object? value) => value is GameObject go ? go : (value as Component)?.gameObject;
 }
 
@@ -84,6 +78,37 @@ internal static class GameUi
     }
     public static Component? Font(Menu menu) => Components(menu, "TMPro.TMP_Text").Concat(Loaded("TMPro.TMP_Text"))
         .FirstOrDefault(c => NativeAccess.Read(c, "font") != null);
+    public static Component? Canvas(Menu menu)
+    {
+        var type = FindType("UnityEngine.Canvas");
+        if (type == null) return null;
+        foreach (var root in Roots(menu))
+        {
+            var canvas = root.GetComponentInParent(type);
+            if (canvas) return NativeAccess.Read(canvas, "rootCanvas") as Component ?? canvas;
+        }
+        return null;
+    }
+    public static float InterfaceScale(Menu menu)
+    {
+        var canvas = Canvas(menu);
+        float scale = NativeAccess.Read(canvas, "scaleFactor") is float value ? value : 1;
+        var reference = NativeAccess.Object(NativeAccess.Read(menu, "menuEntriesParent", "m_menuDialog", "m_root"));
+        return UiLayout.EffectiveScale(scale, canvas ? Math.Abs(canvas!.transform.lossyScale.x) : 0,
+            reference ? Math.Abs(reference!.transform.lossyScale.x) : 0);
+    }
+    public static Vector2 SettingsSize(Menu menu)
+    {
+        var settings = NativeAccess.Object(NativeAccess.Read(menu, "m_settingsInstance"));
+        if (!settings) settings = NativeAccess.Object(NativeAccess.Read(menu, "m_settingsPrefab"));
+        if (!settings) return Vector2.zero;
+        // Ignore fullscreen dimmers and individual controls. Settings prefabs
+        // commonly keep the actual dialog on a child RectTransform.
+        var panel = settings!.GetComponentsInChildren<RectTransform>(true)
+            .Where(r => r.rect.width >= 600 && r.rect.width <= 1400 && r.rect.height >= 450 && r.rect.height <= 1000)
+            .OrderByDescending(r => r.rect.width * r.rect.height).FirstOrDefault();
+        return panel ? panel!.rect.size : Vector2.zero;
+    }
     public static string Describe(Menu menu) => "Menu roots=" + string.Join(",", Roots(menu).Select(r => r.name).Distinct()) +
         "; buttons=" + Components(menu, "UnityEngine.UI.Button").Count() + "; TMP=" + Components(menu, "TMPro.TMP_Text").Count();
 }
