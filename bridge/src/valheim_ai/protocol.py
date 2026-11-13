@@ -22,6 +22,8 @@ class InventoryItem(StrictModel):
     food: bool
     equipable: bool
     item_key: str = Field(default="", max_length=160)
+    item_prefab: str = Field(default="", max_length=160)
+    item_token: str = Field(default="", max_length=200)
     quest: bool = False
     category: str = Field(default="", max_length=40)
     damage: float = Field(default=0, ge=0)
@@ -112,6 +114,16 @@ class Entity(StrictModel):
     count: int = Field(default=1, ge=1, le=100000)
     weight: float = Field(default=0, ge=0)
     pickup_allowed: bool = True
+    item_prefab: str = Field(default="", max_length=160)
+    item_token: str = Field(default="", max_length=200)
+    produces: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ItemCatalogEntry(StrictModel):
+    item_prefab: str = Field(min_length=1, max_length=160)
+    name: str = Field(max_length=120)
+    token: str = Field(default="", max_length=200)
+    category: str = Field(default="", max_length=80)
 
 
 class RecipeOption(StrictModel):
@@ -140,6 +152,10 @@ class Snapshot(StrictModel):
     ground_scan_radius: float = Field(default=20, ge=0, le=200)
     ground_items_total: int = Field(default=0, ge=0)
     ground_items_truncated: bool = False
+    item_catalog: list[ItemCatalogEntry] = Field(default_factory=list, max_length=4096)
+    item_catalog_version: str = Field(default="", max_length=100)
+    item_catalog_total: int = Field(default=0, ge=0)
+    item_catalog_truncated: bool = False
     leader_id: str = Field(default="", max_length=100)
     leader_name: str = Field(default="", max_length=120)
     leader_status: str = Field(default="", pattern="^(|visible|unavailable|out_of_range)$")
@@ -253,6 +269,7 @@ class DecisionReply(Decision):
     plan_id: str = ""
     mode: str = "stop"
     avoid_combat: bool = False
+    item_catalog_version: str = ""
 
 
 class ChatIntent(StrictModel):

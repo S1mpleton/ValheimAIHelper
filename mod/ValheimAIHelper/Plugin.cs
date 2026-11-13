@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.3")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.4")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -35,6 +35,7 @@ public sealed partial class Plugin : BaseUnityPlugin
     private string lastFailure = "";
     private int sequence, requestedRevision;
     private string requestedMode = "";
+    private string acknowledgedCatalog = "";
     private Rect window = new(20, 80, 480, 340);
     private GUIStyle? statusStyle;
 
@@ -127,6 +128,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         if (!actor) return false;
         session = Guid.NewGuid().ToString("N");
         sequence = 0;
+        acknowledgedCatalog = "";
         requestedRevision = 0; requestedMode = "";
         active = true;
         bridgeSessionReady = false;
@@ -221,6 +223,8 @@ public sealed partial class Plugin : BaseUnityPlugin
                 observation.Data.action_status = executor.ActionStatus;
                 observation.Data.action_completed_amount = executor.CompletedAmount;
                 observation.Data.supported_actions = Capabilities.NpcSupported(allowCombat.Value);
+                if (observation.Data.item_catalog_version == acknowledgedCatalog)
+                    observation.Data.item_catalog = Array.Empty<ItemCatalogEntry>();
                 payload = WireJson.Serialize(observation.Data);
             }
             catch (Exception ex)
@@ -248,6 +252,7 @@ public sealed partial class Plugin : BaseUnityPlugin
                     if (!active || actor == null || !actor) yield break;
                     if (request.result != UnityWebRequest.Result.Success)
                     {
+                        acknowledgedCatalog = "";
                         status = BridgeFailure.Describe(request.responseCode, request.downloadHandler.text);
                         if (status != lastFailure) { Logger.LogWarning(status); AddLog("bridge", status); lastFailure = status; }
                         executor.Stop(actor, status);
@@ -261,6 +266,7 @@ public sealed partial class Plugin : BaseUnityPlugin
                         catch (Exception) { status = "Некорректный ответ моста"; }
                         if (DecisionPolicy.Accept(decision, observation.Data, allowCombat.Value, requestedRevision))
                         {
+                            acknowledgedCatalog = decision!.item_catalog_version == observation.Data.item_catalog_version ? decision.item_catalog_version : "";
                             bridgeSessionReady = true;
                             if (decision!.mode == "stop" && requestedMode.Length > 0)
                             {

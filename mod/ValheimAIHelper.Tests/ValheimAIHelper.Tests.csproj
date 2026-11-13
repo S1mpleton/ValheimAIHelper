@@ -11,6 +11,8 @@
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
     <Compile Include="../ValheimAIHelper/Protocol.cs" Link="Protocol.cs" />
+    <Compile Include="../ValheimAIHelper/ItemCatalogPolicy.cs" Link="ItemCatalogPolicy.cs" />
+    <Compile Include="../ValheimAIHelper/ItemCatalogFile.cs" Link="ItemCatalogFile.cs" />
     <Compile Include="../ValheimAIHelper/NpcAuthorityPolicy.cs" Link="NpcAuthorityPolicy.cs" />
     <Compile Include="../ValheimAIHelper/NpcInventoryAccess.cs" Link="NpcInventoryAccess.cs" />
     <Compile Include="../ValheimAIHelper/WorkIdentity.cs" Link="WorkIdentity.cs" />

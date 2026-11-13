@@ -11,19 +11,29 @@ internal static class NpcInventoryWindow
 {
     private static NpcInventoryProxy? current;
     private static bool hooksReady;
+    private static int useFrame = -1;
+    internal static bool UseAttempted => useFrame == Time.frameCount;
+    internal static void MarkUseAttempt() => useFrame = Time.frameCount;
 
     internal static void Initialize(Harmony harmony)
     {
         hooksReady = false;
         foreach (var name in new[] { "m_inventory", "m_nview" })
             if (UiReflection.Field(typeof(Container), name) == null) throw new MissingFieldException(typeof(Container).FullName, name);
-        foreach (var name in new[] { "m_firstContainerUpdate", "m_containerHoldTime", "m_containerHoldState" })
-            if (UiReflection.Field(typeof(InventoryGui), name) == null) throw new MissingFieldException(typeof(InventoryGui).FullName, name);
         foreach (var patch in new[] { typeof(NpcContainerAwakePatch), typeof(NpcContainerUsePatch),
             typeof(NpcContainerStackPatch), typeof(NpcContainerInteractPatch), typeof(NpcContainerTakePatch),
             typeof(NpcInventorySelectedPatch), typeof(NpcInventoryTakeAllPatch), typeof(NpcInventoryStackAllPatch), typeof(NpcInventoryDropPatch), typeof(NpcInventoryRightClickPatch),
             typeof(NpcInventoryHoverPatch), typeof(NpcInventoryTitlePatch) }) harmony.PatchAll(patch);
         hooksReady = true;
+        // A Player prefab (or another mod) can expose another Interactable before
+        // our component. Route the native use target explicitly instead of
+        // depending on GetComponentInParent<Interactable>() component ordering.
+        // Keep the component path as compatibility fallback if this native entry
+        // point changes in a future game version.
+        try { harmony.PatchAll(typeof(NpcInventoryUseTargetPatch)); }
+        catch (Exception ex) { Plugin.NpcInventoryLog("Резервный обработчик E недоступен: " + ex); }
+        try { harmony.PatchAll(typeof(NpcInventoryUseFallbackPatch)); }
+        catch (Exception ex) { Plugin.NpcInventoryLog("Резерв наведения NPC недоступен: " + ex); }
     }
 
     internal static void Attach(Player npc)
@@ -60,14 +70,11 @@ internal static class NpcInventoryWindow
                 throw new InvalidOperationException("NPC inventory adapter is not connected to the actual bag");
             proxy.Container.enabled = false;
             proxy.InUse = true;
-            UiReflection.Field(typeof(InventoryGui), "m_firstContainerUpdate")!.SetValue(gui, true);
-            UiReflection.Field(typeof(InventoryGui), "m_containerHoldTime")!.SetValue(gui, 0f);
-            UiReflection.Field(typeof(InventoryGui), "m_containerHoldState")!.SetValue(gui, 0);
-            // Unlike a chest's RPC response, this opens in the same frame as E.
-            // Consume that input so InventoryGui.Update does not close it again.
-            ZInput.ResetButtonStatus("Use");
-            ZInput.ResetButtonStatus("JoyUse");
-            NativeMethods.Call(gui, "Show", proxy.Container, 1);
+            // A vanilla chest opens on a later RPC response, after the use key
+            // event and menu button callback finish. Match that timing instead
+            // of showing a new UI synchronously inside Player.Interact.
+            proxy.RequestFrame = Time.frameCount;
+            Plugin.NpcInventoryLog("Запрошен инвентарь " + npc.GetPlayerName() + "; ожидание следующего кадра.");
             return true;
         }
         catch (Exception ex)
@@ -107,9 +114,38 @@ internal static class NpcInventoryWindow
     internal static void Update()
     {
         if (!current) { current = null; return; }
-        if (!CanOpen(current!.Npc, out _, true) || !InventoryGui.IsVisible() ||
-            NativeAccess.Read(InventoryGui.instance, "m_currentContainer") as Container != current.Container)
+        if (!CanOpen(current!.Npc, out string error, true))
+        { Plugin.NpcInventoryLog("Обмен закрыт: " + error); Close(); return; }
+        if (!current.Shown)
+        {
+            if (Time.frameCount == current.RequestFrame) return;
+            try
+            {
+                var gui = InventoryGui.instance;
+                // Optional UI bookkeeping differs between game versions.
+                UiReflection.Field(typeof(InventoryGui), "m_firstContainerUpdate")?.SetValue(gui, true);
+                UiReflection.Field(typeof(InventoryGui), "m_containerHoldTime")?.SetValue(gui, 0f);
+                UiReflection.Field(typeof(InventoryGui), "m_containerHoldState")?.SetValue(gui, 0);
+                ZInput.ResetButtonStatus("Use"); ZInput.ResetButtonStatus("JoyUse");
+                NativeMethods.Call(gui, "Show", current.Container, 1);
+                if (NativeAccess.Read(gui, "m_currentContainer") as Container != current.Container)
+                    throw new InvalidOperationException("InventoryGui.Show did not retain the NPC container");
+                current.Shown = true;
+                Plugin.NpcInventoryLog("Штатное окно инвентаря NPC открыто.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.NpcInventoryLog("Ошибка открытия штатного инвентаря: " + ex);
+                if (Player.m_localPlayer) Player.m_localPlayer.Message(MessageHud.MessageType.Center, "Не удалось открыть инвентарь NPC. См. журнал.");
+                Close();
+            }
+            return;
+        }
+        if (!InventoryGui.IsVisible() || NativeAccess.Read(InventoryGui.instance, "m_currentContainer") as Container != current.Container)
+        {
+            Plugin.NpcInventoryLog(!InventoryGui.IsVisible() ? "Окно инвентаря закрыто игроком / игрой." : "Открыт другой инвентарь; обмен с NPC закрыт.");
             Close();
+        }
     }
 
     internal static void Close()
@@ -208,6 +244,8 @@ internal sealed class NpcInventoryProxy : MonoBehaviour
     internal Player Npc = null!;
     internal Container Container = null!;
     internal bool InUse;
+    internal int RequestFrame;
+    internal bool Shown;
 }
 
 internal sealed class NpcInventoryInteraction : MonoBehaviour, Interactable
@@ -217,10 +255,65 @@ internal sealed class NpcInventoryInteraction : MonoBehaviour, Interactable
         if (hold || user != Player.m_localPlayer) return false;
         var npc = GetComponent<Player>();
         if (!CompanionNpc.Is(npc)) return false;
+        Plugin.NpcInventoryLog("E: обращение к компоненту NPC " + npc.GetPlayerName());
         Plugin.OpenNpcInventory(npc);
         return true;
     }
     public bool UseItem(Humanoid user, ItemDrop.ItemData item) => false;
+}
+
+[HarmonyPatch(typeof(Player), "Interact", new[] { typeof(GameObject), typeof(bool), typeof(bool) })]
+internal static class NpcInventoryUseTargetPatch
+{
+    private static bool Prefix(Player __instance, GameObject __0, bool __1)
+    {
+        var go = __0; bool hold = __1;
+        if (__instance != Player.m_localPlayer || !go) return true;
+        var npc = go.GetComponentInParent<Player>();
+        if (!npc || !CompanionNpc.Is(npc)) return true;
+        NpcInventoryWindow.MarkUseAttempt();
+        if (NpcInventoryAccess.MayDispatchUse(true, true, hold, __instance.InAttack(), __instance.InDodge()))
+        {
+            var nativeTarget = go.GetComponentInParent<Interactable>();
+            Plugin.NpcInventoryLog("E: выбран NPC " + npc.GetPlayerName() + "; цель " + go.name +
+                "; штатный Interactable: " + (nativeTarget?.GetType().Name ?? "нет"));
+            Plugin.OpenNpcInventory(npc);
+        }
+        return false;
+    }
+}
+
+// Some game/UI versions show a creature's hover text without routing that
+// creature through Interactable. After native input, use the SAME native hover
+// target as a fallback. Never intercept typing, menus, other players or chests.
+[HarmonyPatch(typeof(Player), "Update")]
+internal static class NpcInventoryUseFallbackPatch
+{
+    private static readonly System.Reflection.MethodInfo? radial = typeof(Hud).GetMethod("InRadial",
+        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+        null, Type.EmptyTypes, null);
+    private static void Prefix(Player __instance, out bool __state)
+    {
+        __state = false;
+        if (__instance != Player.m_localPlayer || !(ZInput.GetButtonDown("Use") || ZInput.GetButtonDown("JoyUse"))) return;
+        try { __state = radial != null && radial.Invoke(null, null) is false && NativeMethods.Call(__instance, "TakeInput") is true; }
+        catch (Exception ex) { Plugin.NpcInventoryLog("Ошибка проверки ввода NPC: " + ex); }
+    }
+    private static void Postfix(Player __instance, bool __state)
+    {
+        if (!__state || NpcInventoryWindow.UseAttempted) return;
+        try
+        {
+            var hovered = NativeAccess.Read(__instance, "m_hovering") as GameObject;
+            var npc = hovered ? hovered!.GetComponentInParent<Player>() : NativeAccess.Read(__instance, "m_hoveringCreature") as Player;
+            if (npc is null || !npc || !CompanionNpc.Is(npc) || NpcInventoryWindow.IsOpenFor(npc)) return;
+            if (!NpcInventoryAccess.MayDispatchUse(true, true, false, __instance.InAttack(), __instance.InDodge())) return;
+            NpcInventoryWindow.MarkUseAttempt();
+            Plugin.NpcInventoryLog("E: наведение на NPC " + npc.GetPlayerName() + "; прямое открытие сумки.");
+            Plugin.OpenNpcInventory(npc);
+        }
+        catch (Exception ex) { Plugin.NpcInventoryLog("Ошибка обработки наведения NPC: " + ex); }
+    }
 }
 
 [HarmonyPatch(typeof(Container), "Awake")]

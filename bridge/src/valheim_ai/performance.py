@@ -20,6 +20,14 @@ def ollama_statistics(data: dict) -> dict:
     return result
 
 
+def accumulate_statistics(target, values):
+    """One plan may resolve intent, check bulk scope and generate its action."""
+    for key in ("load_seconds", "prompt_seconds", "generation_seconds", "prompt_tokens", "output_tokens"):
+        if key in values: target[key] = round(target.get(key, 0) + values[key], 3)
+    if target.get("generation_seconds", 0) > 0 and "output_tokens" in target:
+        target["tokens_per_second"] = round(target["output_tokens"] / target["generation_seconds"], 2)
+
+
 class Performance:
     def __init__(self):
         self.current = None

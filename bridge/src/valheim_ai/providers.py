@@ -297,14 +297,18 @@ async def decide(
     objective: str,
     snapshot: Snapshot,
     *, planning: bool = False, history: tuple[str, ...] = (), chat: tuple[dict, ...] = (),
-    ollama_url: str = "http://127.0.0.1:11434", ollama_session=None, statistics=None, trace=None,
+    ollama_url: str = "http://127.0.0.1:11434", ollama_session=None, statistics=None, trace=None, execution_snapshot=None, item_intent=None,
 ) -> Decision | Plan:
+    snapshot = execution_snapshot if execution_snapshot is not None else snapshot
     local_snapshot, local_ids = snapshot, {}
     if provider == "ollama":
         from .local_ids import readable_view
         local_snapshot, local_ids = readable_view(snapshot)
     request_snapshot = local_snapshot if provider == "ollama" else snapshot
     data = request_snapshot.model_dump(mode="json", exclude_none=provider == "ollama", exclude_defaults=provider == "ollama")
+    # The full game dictionary is cached by the bridge and searched by the item
+    # resolver. It is not available stock and must not flood every model prompt.
+    data.pop("item_catalog", None)
     if provider == "ollama":
         # Bound local context without removing any inventory IDs. The full
         # authoritative snapshot is still used for validation below.
@@ -361,8 +365,24 @@ async def decide(
             from .local_prompt import instructions
             # Ollama accepts optional JSON properties. Requiring every unused
             # argument inflated output and made small models invent coordinates.
-            schema = action_schema(local_snapshot, planning, chat, history)
+            transfer = None
+            if item_intent is not None and item_intent.goal in ("give", "drop"):
+                from .item_intent import prefab_of
+                ids = {i.id for i in snapshot.actor.inventory if not i.quest and
+                       (item_intent.selection == "all_inventory" or prefab_of(i, snapshot) in item_intent.item_prefabs)}
+                if item_intent.selection == "exact":
+                    totals = {}
+                    for item in snapshot.actor.inventory:
+                        if item.id in ids:
+                            group = item.item_key or item.id
+                            totals[group] = totals.get(group, 0) + item.count
+                    ids = {i.id for i in snapshot.actor.inventory if i.id in ids and totals.get(i.item_key or i.id, 0) >= item_intent.amount}
+                transfer = {"ids": [alias for alias, native in local_ids.items() if native in ids],
+                            "selection": item_intent.selection, "amount": item_intent.amount}
+            schema = action_schema(local_snapshot, planning, chat, history, transfer=transfer)
             messages[0]["content"] = instructions(schema, planning) + chat_prompt
+            if item_intent is not None:
+                messages[0]["content"] += "\nResolved current request (follow exactly; catalog is not stock): " + item_intent.model_dump_json()
             # Small local models benefit from the operator goal after the data,
             # instead of copying the last observed status as their new task.
             messages = [messages[0], messages[2], {"role":"user","content":"User objective: " + objective +

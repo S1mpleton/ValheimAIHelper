@@ -45,21 +45,30 @@ internal sealed class Observation
         target && !(target is Player) && !target.IsDead() && !target.IsTamed() && target.GetBaseAI() is MonsterAI && BaseAI.IsEnemy(actor, target);
     public static bool IsWildAnimal(Character target) =>
         target && !(target is Player) && !target.IsDead() && !target.IsTamed() && target.GetBaseAI() is AnimalAI;
-    private static InventoryEntry Item(Player actor, ItemDrop.ItemData item, bool container = false) => new()
+    private static InventoryEntry Item(Player actor, ItemDrop.ItemData item, bool container = false)
     {
+        string category = item.m_shared.m_itemType.ToString();
+        bool weapon = item.IsWeapon();
+        bool damage = ItemCatalogPolicy.HasDamage(category, weapon);
+        string prefab = ItemCatalog.Prefab(item);
+        return new InventoryEntry {
         id=ItemId(item, container), name=Name(item.m_shared.m_name), count=Math.Min(item.m_stack,100000),
         equipped=item.m_equipped, food=item.m_shared.m_food>0, equipable=item.IsEquipable(),
-        category=item.m_shared.m_itemType.ToString(), damage=ObservationValues.Vital(item.GetDamage().GetTotalDamage()),
+        item_prefab=prefab, item_token=ObservationValues.Text(item.m_shared.m_name,160),
+        category=category, damage=damage?ObservationValues.Vital(item.GetDamage().GetTotalDamage()):0,
         durability=item.m_shared.m_useDurability ? Mathf.Clamp01(item.m_durability/Mathf.Max(1,item.GetMaxDurability())) : 1,
         food_health=ObservationValues.Vital(item.m_shared.m_food), food_stamina=ObservationValues.Vital(item.m_shared.m_foodStamina),
         usable=item.m_shared.m_itemType==ItemDrop.ItemData.ItemType.Consumable,
-        item_key=(item.m_dropPrefab ? item.m_dropPrefab.name : item.m_shared.m_name)+":"+item.m_quality+":"+item.m_variant, quest=item.m_shared.m_questItem,
+        item_key=(prefab.Length>0?prefab:item.m_shared.m_name)+":"+item.m_quality+":"+item.m_variant, quest=item.m_shared.m_questItem,
         can_eat=item.m_shared.m_food>0 && actor.CanEat(item,false), weight=ObservationValues.Vital(item.m_shared.m_weight*item.m_stack),
-        tool_tier=Mathf.Clamp(item.m_shared.m_toolTier,0,20), effect=Name(item.m_shared.m_consumeStatusEffect ? item.m_shared.m_consumeStatusEffect.name : ""),
+        tool_tier=ItemCatalogPolicy.HasToolTier(category,weapon)?Mathf.Clamp(item.m_shared.m_toolTier,0,20):0, effect=Name(item.m_shared.m_consumeStatusEffect ? item.m_shared.m_consumeStatusEffect.name : ""),
         quality=Mathf.Clamp(item.m_quality,1,100),max_quality=Mathf.Clamp(item.m_shared.m_maxQuality,1,100),
-        armor=ObservationValues.Vital(item.GetArmor()),block_power=ObservationValues.Vital(item.m_shared.m_blockPower),
-        ammo_type=Name(item.m_shared.m_ammoType,80),skill=item.m_shared.m_skillType.ToString(),damage_types=DamageTypes(item)
-    };
+        armor=ItemCatalogPolicy.HasArmor(category)?ObservationValues.Vital(item.GetArmor()):0,
+        block_power=ItemCatalogPolicy.HasBlock(category,weapon)?ObservationValues.Vital(item.m_shared.m_blockPower):0,
+        ammo_type=damage?Name(item.m_shared.m_ammoType,80):"",
+        skill=ItemCatalogPolicy.HasSkill(category,weapon)?item.m_shared.m_skillType.ToString():"",damage_types=damage?DamageTypes(item):""
+        };
+    }
     private static string DamageTypes(ItemDrop.ItemData item)
     {
         object damage=item.GetDamage();
@@ -72,6 +81,9 @@ internal sealed class Observation
     public static Observation Capture(Player actor, Player? leader, string session, int sequence, string result)
     {
         var o=new Observation(); var origin=actor.transform.position; var entities=new List<Entity>();
+        ItemCatalog.Refresh();
+        o.Data.item_catalog=ItemCatalog.SnapshotEntries;o.Data.item_catalog_version=ItemCatalog.Version;
+        o.Data.item_catalog_total=ItemCatalog.Count;o.Data.item_catalog_truncated=ItemCatalog.Count>ItemCatalog.SnapshotEntries.Length;
         var inventory=actor.GetInventory().GetAllItems().Where(i=>i!=null && i.m_stack>0).Take(64).ToArray();
         foreach(var item in inventory) o.Items[ItemId(item)]=item;
         o.Data.leader_status = leader ? "out_of_range" : "unavailable";
@@ -106,6 +118,7 @@ internal sealed class Observation
         {
             string id="drop:"+d.GetInstanceID();o.Drops[id]=d;
             entities.Add(new Entity {id=id,name=Name(d.m_itemData.m_shared.m_name),kind="item",interaction="pickup",category=d.m_itemData.m_shared.m_itemType.ToString(),
+                item_prefab=ItemCatalog.Prefab(d.m_itemData),item_token=ObservationValues.Text(d.m_itemData.m_shared.m_name,160),
                 position=Pos(d.transform.position),distance=Vector3.Distance(origin,d.transform.position),count=Mathf.Clamp(d.m_itemData.m_stack,1,100000),
                 weight=ObservationValues.Vital(d.m_itemData.GetWeight()),pickup_allowed=d.CanPickup(false),state=d.CanPickup(false)?"Выпавший предмет":"Подбор временно недоступен игре"});
         }
@@ -119,6 +132,7 @@ internal sealed class Observation
         {
             string id=WorldId(c);o.Interactables[id]=c;var hover=c as Hoverable;
             entities.Add(new Entity {id=id,name=Name(hover?.GetHoverName()??c.name),kind="interactable",interaction="interact",category=categories[c.GetType().Name],
+                produces=ItemCatalog.Produces(c),
                 state=Name(hover?.GetHoverText()??"",240),position=Pos(c.transform.position),distance=Vector3.Distance(origin,c.transform.position)});
         }
         foreach(var c in objects.Where(c=>ResourcePolicy.IsHarvestResource(c.GetType().Name, c.GetComponent<Pickable>() || c.GetComponent<PickableItem>(), c.GetComponent<ItemDrop>(),

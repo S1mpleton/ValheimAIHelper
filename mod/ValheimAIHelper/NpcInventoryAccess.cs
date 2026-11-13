@@ -7,6 +7,8 @@ public enum NpcInventoryAccessResult { Allowed, Unavailable, InvalidNpc, Loading
 public static class NpcInventoryAccess
 {
     public const double OpenDistance = 3.5, CloseDistance = 4;
+    public static bool MayDispatchUse(bool localHuman, bool companionTarget, bool hold, bool attacking, bool dodging)
+        => localHuman && companionTarget && !hold && !attacking && !dodging;
     public static NpcInventoryAccessResult Check(bool initialized, bool validNpc, bool ready,
         bool worldHost, bool npcOwned, bool validHuman, bool humanOwned, bool guiReady,
         double distance, bool existingSession)

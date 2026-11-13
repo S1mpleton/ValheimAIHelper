@@ -11,6 +11,7 @@ namespace ValheimAIHelper;
     public int count;
     public bool equipped, food, equipable;
     public string item_key = "";
+    public string item_prefab = "", item_token = "";
     public bool quest;
     public string category = "";
     public float damage, durability = 1, food_health, food_stamina;
@@ -55,6 +56,12 @@ namespace ValheimAIHelper;
     public int count = 1;
     public float weight;
     public bool pickup_allowed = true;
+    public string item_prefab = "", item_token = "";
+    public string[] produces = Array.Empty<string>();
+}
+[Serializable] public sealed class ItemCatalogEntry
+{
+    public string item_prefab = "", name = "", token = "", category = "";
 }
 [Serializable] public sealed class RecipeOption
 {
@@ -72,6 +79,11 @@ namespace ValheimAIHelper;
     public float ground_scan_radius = 20;
     public int ground_items_total;
     public bool ground_items_truncated;
+    // Type definitions are knowledge, not a list of available world objects.
+    public ItemCatalogEntry[] item_catalog = Array.Empty<ItemCatalogEntry>();
+    public string item_catalog_version = "";
+    public int item_catalog_total;
+    public bool item_catalog_truncated;
     public int protocol_version = 1;
     public string session_id = "";
     public int sequence;
@@ -101,6 +113,7 @@ namespace ValheimAIHelper;
     [DataMember] public Position? destination;
     [DataMember] public bool run;
     [DataMember] public bool avoid_combat;
+    [DataMember] public string item_catalog_version = "";
     [DataMember] public string item_id = "", text = "", selection = "exact";
     [DataMember] public int amount, rotation;
 }

@@ -253,7 +253,7 @@ public sealed partial class Plugin
                 { int index = modelPage * 2 + slot; if (index < p.uiModels.Length) p.uiModel = p.uiModels[index]; }));
             }
             Button(tab, "Ещё модели", 684, 215, 128, () => { if (p.uiModels.Length > 0) modelPage = (modelPage + 1) % ((p.uiModels.Length + 1) / 2); });
-            Label(tab, "Интервал AI, сек. (20 ≈ 3 запроса/мин)", 0, 299, 416, 24, 15);
+            Label(tab, "Пауза между планами AI, сек.", 0, 299, 416, 24, 15);
             intervalInput = InputField(tab, p.uiInterval, 422, 291, 74, 36, 3, s => p.uiInterval = s);
             Button(tab, "Сохранить", 528, 291, 284, () => p.StartCoroutine(p.ApplySettings()), true);
             Button(tab, "Проверить модель", 528, 336, 284, () => p.StartCoroutine(p.CheckModel()), true);

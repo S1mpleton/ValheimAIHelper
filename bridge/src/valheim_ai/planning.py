@@ -54,7 +54,10 @@ class Planner:
     async def _plan(self, snapshot, revision, session):
         state = self.state
         pending_ids = {m["id"] for m in state.pending_chat}
+        explicit = {m["id"] for m in state.pending_chat if m.get("explicit_address")}
+        if explicit: pending_ids = explicit
         chat = tuple({**m,"pending":m["id"] in pending_ids} for m in state.chat_history)
+        classification_only = state.provider == "ollama" and bool(snapshot.item_catalog) and bool(pending_ids) and not explicit
         execution_epoch = self.execution_epoch
         try:
             result = await asyncio.wait_for(state.decide(
@@ -80,6 +83,7 @@ class Planner:
                     mode = "ai" if intent.mode == "task" else intent.mode
                     state.command = state.command.model_copy(update={"mode": mode, "objective": intent.objective or state.command.objective})
                     state.revision += 1
+                    state.item_intents.clear()
                     self.successful_steps = 0
                     self.announced = False
                     state.event("operator", "Из обычного чата: " + state.command.objective if mode == "ai" else "Из чата: " + mode)
@@ -88,6 +92,15 @@ class Planner:
                     state.event("assistant", intent.reply)
                     state.chat_history.append({"id": 0, "speaker": "assistant", "text": intent.reply, "explicit_address": False})
             state.pending_chat = deque((m for m in state.pending_chat if m["id"] not in pending_ids), maxlen=6)
+            if classification_only:
+                if intent and intent.message_id in pending_ids and intent.addressed and intent.mode in ("task", "follow", "stop"):
+                    self.steps.clear()
+                    self.plan_id = ""
+                    self.history.clear()
+                    state.next_ai_request = 0
+                # Ignore/reply preserve the existing mission and its valid
+                # native step. A classifier's dummy wait never replaces it.
+                return
             if state.command.mode != "ai":
                 self.steps.clear(); self.plan_id = ""
                 return

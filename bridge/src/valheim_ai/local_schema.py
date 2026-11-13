@@ -5,7 +5,7 @@ from .protocol import Decision, Plan
 from .affordances import can_gather
 
 
-def action_schema(snapshot, planning, chat=(), history=()):
+def action_schema(snapshot, planning, chat=(), history=(), *, transfer=None):
     schema = (Plan if planning else Decision).model_json_schema()
     base = schema["$defs"]["Decision"] if planning else schema
     properties = base["properties"]
@@ -13,7 +13,7 @@ def action_schema(snapshot, planning, chat=(), history=()):
     entities = snapshot.entities
     kinds = lambda kind, radius=20: [e.id for e in entities if e.kind == kind and e.distance <= radius]
     categories = lambda category: [e.id for e in entities if e.category == category and e.distance <= 20]
-    bags = [i.id for i in inventory]
+    bags = [i.id for i in inventory if transfer is None or i.id in transfer["ids"]]
     targets = {
         "follow": [snapshot.leader_id] if snapshot.leader_id else [],
         "give": kinds("player", 60) if bags else [],
@@ -56,9 +56,13 @@ def action_schema(snapshot, planning, chat=(), history=()):
         if action == "build": args["rotation"] = deepcopy(properties["rotation"])
         if action in ("give", "drop"):
             args["selection"] = {"type": "string", "enum": ["exact", "all_matching"]}
+            if transfer is not None:
+                args["selection"] = {"type": "string", "const": transfer["selection"]}
+                args["amount"] = {"type": "integer", "const": transfer["amount"]}
         variant = {"type": "object", "properties": args, "required": names, "additionalProperties": False}
-        variants.append(variant)
-        if action in ("give", "drop") and any(not i.quest for i in inventory):
+        if not (action in ("give", "drop") and transfer is not None and transfer["selection"] == "all_inventory"):
+            variants.append(variant)
+        if action in ("give", "drop") and any(not i.quest for i in inventory) and (transfer is None or transfer["selection"] == "all_inventory"):
             bulk = deepcopy(variant)
             bulk["properties"]["selection"] = {"type": "string", "const": "all_inventory"}
             bulk["properties"]["item_id" if action == "give" else "target_id"] = {"type": "string", "const": ""}

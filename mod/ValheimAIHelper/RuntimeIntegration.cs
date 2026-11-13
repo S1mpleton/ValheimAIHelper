@@ -35,7 +35,7 @@ public sealed partial class Plugin
     private void InitRuntime()
     {
         journal.RegisterSecret(bridgeToken.Value);
-        AddLog("version", "Valheim AI Helper 0.7.3; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
+        AddLog("version", "Valheim AI Helper 0.7.4; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
         if (!autoBridge.Value) { AddLog("service", "Автозапуск выключен в конфигурации; используется внешний мост."); return; }
         StartLocalRuntime();
     }
@@ -98,10 +98,11 @@ public sealed partial class Plugin
                 if (events[i].source == "assistant" && allowChat.Value && Player.m_localPlayer) ChatReply(events[i].message);
             }
     }
-    private string Report() => journal.Redact("Valheim AI Helper 0.7.3\nValheim: " + global::Version.GetVersionString() +
+    private string Report() => journal.Redact("Valheim AI Helper 0.7.4\nValheim: " + global::Version.GetVersionString() +
         "\nMode: " + (active ? bridgeStatus?.mode ?? "connecting" : "npc stopped") + "\nLeader: " + (FindLeader() ? resolvedLeaderName : leaderName.Value) +
         "\nLeader mode: " + leaderMode.Value + "; resolved: " + (FindLeader() ? FindLeader()!.GetPlayerName() : "unavailable") + "\nMotor: " + executor.MotorState + "\nArchitecture: one client + NPC; host-authoritative\nNPC: " + (CurrentNpc ? CurrentNpc!.GetPlayerName() + " / " + CurrentNpc.GetZDOID() : "not loaded") + "\nHuman: " + (Player.m_localPlayer ? Player.m_localPlayer.GetPlayerName() : "none") + "\nAI: " + uiProvider + " / " + uiModel + (uiProvider == "ollama" ? "\nOllama: " + (BridgeAddress.IsValid(uiOllamaUrl) ? uiOllamaUrl : "(некорректный адрес)") + "; think=false" : "") + "\nCombat: " + allowCombat.Value + "; survival: " + autoSurvival.Value + "; chat control: " + (controlByAllPlayers.Value ? "all players" : "leader only") +
         "\nPerformance: " + AiPerformanceText.Summary(bridgeStatus?.performance) + "\n" + AiPerformanceText.Details(bridgeStatus?.performance) +
+        "\nItem catalog: " + ItemCatalogReport() +
         "\nNPC inventory now: " + CurrentNpcInventoryReport() +
         "\nLast AI observation - ground items: " + observedGroundItems +
         "\nLast AI observation - inventory: " + observedInventory + "\nLast AI observation - dropped items: " + observedDrops +
@@ -113,6 +114,12 @@ public sealed partial class Plugin
         var items = npc!.GetInventory().GetAllItems();
         return items.Count == 0 ? "Пусто" : string.Join("; ", items.Take(64).Select(i => Observation.Name(i.m_shared.m_name) + " ×" + i.m_stack +
             " (качество " + i.m_quality + (i.m_equipped ? ", надето" : "") + ")"));
+    }
+    private string ItemCatalogReport()
+    {
+        ItemCatalog.Refresh();
+        return ItemCatalog.Count + " types; " + ItemCatalog.Version + "\nCatalog file: " + ItemCatalog.ExportPath +
+            (ItemCatalog.ExportError.Length > 0 ? "\nCatalog export error: " + ItemCatalog.ExportError : "");
     }
     private void CopyReport() { UnityEngine.GUIUtility.systemCopyBuffer = Report(); uiMessage = "Отчёт скопирован. Его можно отправить сообщением."; }
     private void SaveReport()

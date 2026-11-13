@@ -25,6 +25,7 @@ from .dialogue import Dialogue, PART_LIMIT
 from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
+from .task_policy import companion_duty
 
 
 class ProviderSettings(StrictModel):
@@ -90,6 +91,9 @@ class State:
         self.last_sequence = 0
         self.last_seen = 0.0
         self.last_snapshot: Snapshot | None = None
+        self.item_catalog = []
+        self.item_catalog_version = ""
+        self.item_intents = {}
         self.snapshot_error: dict | None = None
         self.provider_error: dict | None = None
         self.events: deque[dict] = deque(maxlen=50)
@@ -138,9 +142,57 @@ class State:
         outcome = "error"
         trace_result = "Запрос не завершён."
         try:
+            item_intent = None
+            planning_snapshot = snapshot
+            chat = kwargs.get("chat", ())
+            unclassified_chat = any(m.get("pending") for m in chat) and not any(m.get("pending") and m.get("explicit_address") for m in chat)
+            if kwargs.get("planning") and (purpose == "chat" or provider == "ollama" and snapshot.item_catalog and unclassified_chat):
+                # Classification is not permission to execute an item action.
+                # A newly adopted task gets a fresh scoped plan afterwards.
+                planning_snapshot = snapshot.model_copy(update={"supported_actions": ["wait"]})
+            if (provider == "ollama" and kwargs.get("planning") and purpose == "plan" and snapshot.item_catalog
+                    and not companion_duty(objective) and not unclassified_chat):
+                from .item_intent import scope_view, blocked_reply, validate_item_decision
+                item_intent = await self.resolve_item_intent(provider, model, base or self.ollama_url, objective, snapshot, chat, kwargs.get("history", ()), record)
+                planning_snapshot = scope_view(item_intent, snapshot)
+                blocked = blocked_reply(item_intent, snapshot)
+                if blocked:
+                    from .protocol import ChatIntent
+                    pending = [m for m in chat if m.get("pending") and m.get("explicit_address")]
+                    intent = ChatIntent(message_id=pending[-1]["id"], addressed=True, mode="task", objective=objective, reply="") if pending else None
+                    result = Plan(steps=[Decision(action=Action.SPEAK, target_id="", duration=1, say="Нет подходящего предмета", text=blocked[:220])], chat_intent=intent)
+                    trace.set("request", {"resolved_item_intent": item_intent.model_dump(), "local_result": blocked,
+                                          "note": "Запрос плана не отправлялся: подходящая цель отсутствует в наблюдении."})
+                    outcome = "ok"
+                    trace_result = "Цель сверена с фактическим снимком. Будет сообщена причина; действие с посторонним объектом не выполняется.\n" + result.model_dump_json(indent=2)
+                    self.event("item-intent", blocked)
+                    return result
             result = await decide(self.client_for(provider), provider, model, key, objective, snapshot,
+                execution_snapshot=planning_snapshot,
+                item_intent=item_intent,
                 ollama_url=base or self.ollama_url, ollama_session=self.ollama_session,
                 statistics=record, trace=trace, **kwargs)
+            if item_intent is not None:
+                from .item_intent import validate_item_decision
+                from .providers import ProviderInvalidAction
+                try:
+                    result = result.model_copy(update={"steps": [validate_item_decision(item_intent, step, snapshot) for step in result.steps]})
+                except ValueError:
+                    raise ProviderInvalidAction("Выбранное моделью действие не соответствует запрошенному предмету или количеству.") from None
+                # An explicitly addressed item task has already been resolved.
+                # Do not let a contradictory stop/reply label cancel that task.
+                pending = [m for m in chat if m.get("pending") and m.get("explicit_address")]
+                if pending and item_intent.goal in ("collect", "give", "drop"):
+                    from .protocol import ChatIntent
+                    result = result.model_copy(update={"chat_intent": ChatIntent(message_id=pending[-1]["id"], addressed=True, mode="task", objective=objective, reply="")})
+                elif item_intent.goal == "reply":
+                    from .reply_policy import validate_reply
+                    text = next((s.text for s in result.steps if s.action == Action.SPEAK and s.text), "") or (result.chat_intent.reply if result.chat_intent else "")
+                    text = text or "Модель не подготовила ответ. Уточните вопрос."
+                    try: validate_reply(text, objective, chat, snapshot.actor.name)
+                    except ValueError:
+                        raise ProviderInvalidAction("Модель повторила вопрос вместо ответа.") from None
+                    result = result.model_copy(update={"steps": [Decision(action=Action.SPEAK, target_id="", duration=1, say="Отвечаю на вопрос", text=text[:220])], "chat_intent": None})
             outcome = "ok"
             trace_result = "Проверка плана: OK. Это ещё не подтверждение применения или исполнения игрой. Устаревший план может быть отброшен.\n" + result.model_dump_json(indent=2)
             return result
@@ -166,6 +218,66 @@ class State:
     async def decide(self, objective, snapshot, **kwargs):
         return await self.infer(self.provider, self.model, self.keys.get(self.provider, ""), objective, snapshot, **kwargs)
 
+    async def resolve_item_intent(self, provider, model, base, objective, snapshot, chat, history, statistics):
+        from .item_intent import intent_request, parse_intent, bulk_review_request
+        from .providers import ProviderInvalidAction
+        key = (provider, model, base, objective, snapshot.item_catalog_version)
+        if key in self.item_intents: return self.item_intents[key]
+        request = intent_request(snapshot, objective, chat=chat, history=history)
+        trace = self.dialogue.begin(provider, model, "item-intent")
+        status, result = "error", "Разбор предмета не завершён."
+        phases = {}
+        try:
+            raw = await self.ollama_session.generate(self.client_for(provider), base, model,
+                request["messages"], request["format"], phases, trace=trace)
+            try: intent = parse_intent(raw, snapshot, request["candidates"])
+            except ValueError:
+                raise ProviderInvalidAction("Модель не смогла определить предмет и тип поручения из игрового каталога.") from None
+            if intent.selection == "all_inventory":
+                import json
+                review = bulk_review_request(objective)
+                review_trace = self.dialogue.begin(provider, model, "item-scope")
+                review_status, review_result = "error", "Область передачи не подтверждена."
+                try:
+                    answer = await self.ollama_session.generate(self.client_for(provider), base, model,
+                        review["messages"], review["format"], phases, trace=review_trace)
+                    try:
+                        body = json.loads(answer)
+                        confirmed = body["confirmed"]
+                        if type(confirmed) is not bool or set(body) != {"confirmed"}: raise ValueError()
+                    except (ValueError, TypeError, KeyError):
+                        raise ProviderInvalidAction("Модель не подтвердила, что игрок просит передать весь инвентарь.") from None
+                    review_status, review_result = "ok", "Весь инвентарь запрошен: " + str(confirmed)
+                except asyncio.CancelledError:
+                    review_status = "cancelled"
+                    raise
+                finally:
+                    review_trace.finish(review_status, review_result)
+                if not confirmed:
+                    # Retry once with the whole-bag branch removed. The model
+                    # still resolves the noun/count; no command synonym parser.
+                    trace.finish("rejected", "Первый разбор выбрал весь инвентарь, проверка области это отклонила.")
+                    trace = self.dialogue.begin(provider, model, "item-intent")
+                    request = intent_request(snapshot, objective, chat=chat, history=history, allow_bulk=False)
+                    raw = await self.ollama_session.generate(self.client_for(provider), base, model,
+                        request["messages"], request["format"], phases, trace=trace)
+                    try:
+                        intent = parse_intent(raw, snapshot, request["candidates"])
+                        if intent.selection == "all_inventory": raise ValueError()
+                    except ValueError:
+                        raise ProviderInvalidAction("Не удалось безопасно определить предмет и количество; передача всех вещей отклонена.") from None
+            if len(self.item_intents) >= 16: self.item_intents.clear()
+            self.item_intents[key] = intent
+            status, result = "ok", "Разбор поручения: " + intent.model_dump_json() + "\nКаталог определяет типы; доступность проверяется по снимку игры."
+            self.event("item-intent", intent.goal + ": " + ", ".join(intent.item_prefabs))
+            return intent
+        except asyncio.CancelledError:
+            status, result = "cancelled", "Разбор предмета отменён; действия не выполняются."
+            raise
+        finally:
+            statistics.update(phases)
+            trace.finish(status, result)
+
     def feedback(self, message, *, key=None, interval=30):
         if not self.chat_listening: return
         key = key or message
@@ -183,6 +295,7 @@ class State:
         for task in tuple(self.inference_tasks): task.cancel()
 
     def cancel_chat(self):
+        self.item_intents.clear()
         if self.chat_task is not None:
             self.chat_task.cancel()
         self.chat_task = None
@@ -275,13 +388,14 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 length = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid length"}, status_code=400)
-            if length < 0 or length > 131072:
+            limit = 2097152 if request.url.path == "/api/decision" else 131072
+            if length < 0 or length > limit:
                 return JSONResponse({"detail": "Request too large"}, status_code=413)
             # Also cap chunked requests rather than trusting Content-Length alone.
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
-                if len(body) > 131072:
+                if len(body) > limit:
                     return JSONResponse({"detail": "Request too large"}, status_code=413)
             request._body = bytes(body)
         response = await call_next(request)
@@ -539,6 +653,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 # depend on a tiny model recognizing that it is being addressed.
                 if state.explicit_chat_mission is None: state.explicit_chat_mission = state.command.objective
                 state.explicit_chat_id = line["id"]
+                state.item_intents.clear()
                 state.command = state.command.model_copy(update={"objective": value.text})
                 state.revision += 1
                 policy = state.planner.combat_policy
@@ -625,6 +740,11 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                     (previous.plan_id, previous.action_status) != (snapshot.plan_id, snapshot.action_status))):
             state.planner.execution_epoch += 1
         state.last_seen = now
+        if snapshot.item_catalog_version and snapshot.item_catalog:
+            state.item_catalog = snapshot.item_catalog
+            state.item_catalog_version = snapshot.item_catalog_version
+        elif snapshot.item_catalog_version == state.item_catalog_version:
+            snapshot = snapshot.model_copy(update={"item_catalog": state.item_catalog})
         state.last_snapshot = snapshot
         state.snapshot_error = None
         revision = state.revision
@@ -639,7 +759,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             result = validate_decision(result, snapshot)
             return DecisionReply(**result.model_dump(), sequence=snapshot.sequence, source=source,
                                  command_revision=state.revision, plan_id=plan_id, mode=state.command.mode,
-                                 avoid_combat=state.planner.combat_policy == "avoid")
+                                 avoid_combat=state.planner.combat_policy == "avoid",
+                                 item_catalog_version=state.item_catalog_version if snapshot.item_catalog_version == state.item_catalog_version else "")
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
         elif mode == "follow":
@@ -694,6 +815,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         result = validate_decision(result, snapshot).model_copy(update={"duration": 3})
         state.event(source, result.say or result.action.value)
         return DecisionReply(**result.model_dump(), sequence=snapshot.sequence,
-                             source=source, command_revision=state.revision, mode=state.command.mode)
+                             source=source, command_revision=state.revision, mode=state.command.mode,
+                             item_catalog_version=state.item_catalog_version if snapshot.item_catalog_version == state.item_catalog_version else "")
 
     return app

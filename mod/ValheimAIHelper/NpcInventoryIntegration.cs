@@ -4,6 +4,7 @@ namespace ValheimAIHelper;
 
 public sealed partial class Plugin
 {
+    internal static void NpcInventoryLog(string message) => instance?.AddLog("npc-inventory", message);
     private void OpenCurrentNpcInventory()
     {
         var npc = CurrentNpc;
@@ -13,6 +14,7 @@ public sealed partial class Plugin
 
     internal static void OpenNpcInventory(Player npc)
     {
+        NpcInventoryWindow.MarkUseAttempt();
         var p = instance;
         if (p == null) return;
         try

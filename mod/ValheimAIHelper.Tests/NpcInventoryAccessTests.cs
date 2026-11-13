@@ -5,6 +5,16 @@ namespace ValheimAIHelper.Tests;
 public class NpcInventoryAccessTests
 {
     [Theory]
+    [InlineData(true, true, false, false, false, true)]
+    [InlineData(false, true, false, false, false, false)]
+    [InlineData(true, false, false, false, false, false)]
+    [InlineData(true, true, true, false, false, false)]
+    [InlineData(true, true, false, true, false, false)]
+    [InlineData(true, true, false, false, true, false)]
+    public void UseTargetsOnlyOwnHumanAndCompanionOnInitialSafePress(bool human, bool companion, bool hold, bool attacking, bool dodging, bool expected)
+        => Assert.Equal(expected, NpcInventoryAccess.MayDispatchUse(human, companion, hold, attacking, dodging));
+
+    [Theory]
     [InlineData(0, false, NpcInventoryAccessResult.Allowed)]
     [InlineData(3.5, false, NpcInventoryAccessResult.Allowed)]
     [InlineData(3.501, false, NpcInventoryAccessResult.TooFar)]

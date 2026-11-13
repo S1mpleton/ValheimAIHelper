@@ -8,7 +8,7 @@ import httpx
 
 from .providers import (OLLAMA_DECISION_TIMEOUT, ProviderError, ProviderUnavailable,
                         ProviderModelNotFound, ProviderLocalConfigurationError)
-from .performance import ollama_statistics
+from .performance import ollama_statistics, accumulate_statistics
 
 DEFAULT_URL = "http://127.0.0.1:11434"
 MODEL_PATTERN = r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}"
@@ -154,7 +154,7 @@ async def generate(client: httpx.AsyncClient, base: str, model: str, messages: l
     payload["think"] = thinking_option(info)
     if trace is not None: trace.set("request", payload)
     data = await request(client, base, "POST", "/api/chat", payload=payload, timeout=OLLAMA_DECISION_TIMEOUT - 15)
-    if statistics is not None: statistics.update(ollama_statistics(data))
+    if statistics is not None: accumulate_statistics(statistics, ollama_statistics(data))
     message = data.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if trace is not None and isinstance(content, str): trace.set("response", content)
