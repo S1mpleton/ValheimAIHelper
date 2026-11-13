@@ -148,7 +148,7 @@ class Planner:
         if self.steps:
             step = self.steps[0]
             terminal = snapshot.plan_id == self.plan_id and snapshot.action_status in ("success", "blocked")
-            budget = step.duration if step.action == Action.WAIT else 90 if step.action in (Action.PICKUP, Action.GIVE) else min(60, step.amount * 5 + 5) if step.action == Action.CRAFT else 25
+            budget = float("inf") if step.action == Action.FOLLOW else step.duration if step.action == Action.WAIT else 90 if step.action in (Action.PICKUP, Action.GIVE) else min(60, step.amount * 5 + 5) if step.action == Action.CRAFT else 25
             if terminal or now - self.step_started >= budget:
                 outcome = snapshot.previous_result if terminal else "Шаг исчерпал время"
                 self.history.append((step.action.value + ": " + outcome)[:240])
@@ -168,6 +168,12 @@ class Planner:
                         state.event("mission", "Передача/сброс завершены: " + state.command.objective)
                         state.command = state.command.model_copy(update={"objective": IDLE_OBJECTIVE})
                         self.successful_steps = 0
+                if terminal and snapshot.action_status == "blocked" and step.action in (Action.GIVE, Action.DROP) and snapshot.action_completed_amount > 0:
+                    # Do not let a new plan repeat the ORIGINAL quantity after
+                    # a partial mutation. A new user request states the remainder.
+                    self.steps.clear()
+                    state.command = state.command.model_copy(update={"objective": IDLE_OBJECTIVE})
+                    state.feedback("Передача выполнена частично (" + str(snapshot.action_completed_amount) + "). Остаток у NPC; дайте новое поручение с нужным количеством.", key="partial-" + self.plan_id, interval=0)
                 # A failed prerequisite invalidates dependent steps in that plan.
                 if (terminal and snapshot.action_status == "blocked") or not terminal:
                     self.steps.clear()
@@ -187,8 +193,7 @@ class Planner:
                 self.steps.clear()
                 self._next_id()
         # Keep a useful, explicitly requested follow going while a model thinks.
-        objective = state.command.objective.lower()
-        if snapshot.leader_id and "follow" in snapshot.supported_actions and any(w in objective for w in ("след", "помог", "защ", "follow", "defend")):
+        if snapshot.leader_id and "follow" in snapshot.supported_actions and state.command.objective in ("Следуй за лидером и помогай ему выжить.", IDLE_OBJECTIVE):
             return Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3,
                             say="Рядом с лидером; ожидаю план AI"), "motor", "follow-pending"
-        return wait("Ожидаю план AI" if self.task else "Ожидаю следующий цикл AI"), "motor", ""
+        return wait("Ожидаю план AI" if self.task else "Ожидаю следующий цикл AI").model_copy(update={"duration": 3}), "motor", ""

@@ -9,6 +9,9 @@ public static class Capabilities
         "pickup", "interact", "eat", "equip", "unequip", "use", "drop", "give", "use_on", "hide_weapon", "show_weapon", "sneak", "unsneak",
         "rest", "stand", "guardian_power", "emote", "speak", "sleep", "open", "close", "take", "deposit", "stack", "craft", "upgrade", "repair", "build", "repair_building"
     };
+    // These three native actions depend on the local camera/bed's global player
+    // identity. Do not offer them to the model until an NPC-specific path exists.
+    public static string[] NpcSupported(bool combat) => Supported(combat, false).Where(a => a != "sleep").ToArray();
     public static string[] Supported(bool combat, bool placement) => All.Where(a => (combat || (a != "attack" && a != "secondary_attack" && a != "hunt")) &&
         (placement || (a != "build" && a != "repair_building"))).ToArray();
 }

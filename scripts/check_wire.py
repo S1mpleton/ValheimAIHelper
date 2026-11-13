@@ -23,6 +23,8 @@ async def main():
     encoded = subprocess.check_output(["dotnet", str(program)], timeout=10)
     capabilities = json.loads(subprocess.check_output(["dotnet", str(program), "--capabilities"], timeout=10))
     assert int(subprocess.check_output(["dotnet",str(program),"--ollama-ui-timeout"],timeout=10))>OLLAMA_DECISION_TIMEOUT
+    npc_capabilities = json.loads(subprocess.check_output(["dotnet", str(program), "--npc-capabilities"], timeout=10))
+    assert set(npc_capabilities) == {a.value for a in Action} - {"build", "repair_building", "sleep"}
     assert set(capabilities) == {a.value for a in Action}, "Mod/bridge action catalog mismatch"
     original = json.loads(encoded)
     assert original["actor"]["name"] == "Бьёрн"
@@ -60,6 +62,8 @@ async def main():
         text=json.dumps(body["messages"],ensure_ascii=False)
         if not probe and "Дай лидеру" in text: step={"action":"give","target_id":"character:42","item_id":"inventory:stones","amount":5,"duration":1,"say":"Передам камни рядом с лидером"}
         if not probe and "Подбери камень вдали" in text: step={"action":"pickup","target_id":"drop:far","amount":1,"duration":1,"say":"Подберу стопку"}
+        if not probe and "Отдай всё NPC" in text: step={"action":"give","target_id":"character:42","item_id":"","selection":"all_inventory","amount":1,"duration":1,"say":"Передам все вещи"}
+        if not probe and "Дай семь NPC" in text: step={"action":"give","target_id":"character:42","item_id":"stone1","amount":7,"duration":1,"say":"Передам семь камней"}
         return httpx.Response(200,json={"message":{"content":json.dumps({"steps":[step]})},"done":True})
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as upstream, httpx.AsyncClient(transport=httpx.MockTransport(ollama_provider)) as local:
         app = create_app(token=token, client=upstream,ollama_client=local)
@@ -152,6 +156,18 @@ async def main():
                 decision=await client.post("/api/decision",json={**extended,"sequence":seq+1})
                 assert subprocess.check_output(["dotnet",str(program),decoder,str(seq+1)],input=decision.content,timeout=10).strip()==expected,decision.text
                 await app.state.bridge.planner.close()
+            npc_snapshot=json.loads(subprocess.check_output(["dotnet",str(program),"--npc-extended"],timeout=10))
+            assert npc_snapshot["actor"]["inventory"][0]["item_key"] == "Stone:1:0"
+            assert npc_snapshot["actor"]["inventory"][-1]["quest"] is True
+            for seq,goal,decoder,expected in [(10,"Отдай всё NPC","--check-bulk-npc-extended-response",b"NPC_BULK_ACCEPTED"),
+                                                (12,"Дай семь NPC","--check-quantity-npc-extended-response",b"NPC_QUANTITY_ACCEPTED:7")]:
+                await client.post("/api/command",json={"mode":"ai","objective":goal})
+                await client.post("/api/decision",json={**npc_snapshot,"sequence":seq})
+                task=app.state.bridge.planner.task
+                if task is not None: await task
+                decision=await client.post("/api/decision",json={**npc_snapshot,"sequence":seq+1})
+                assert subprocess.check_output(["dotnet",str(program),decoder,str(seq+1)],input=decision.content,timeout=10).strip()==expected,decision.text
+                await app.state.bridge.planner.close()
             dialogue=await client.get("/api/dialogue")
             assert subprocess.check_output(["dotnet",str(program),"--read-dialogue-index"],input=dialogue.content,timeout=10).strip()==b"DIALOGUE_INDEX_OK"
             id=dialogue.json()["entries"][0]["id"]
@@ -165,6 +181,7 @@ async def main():
     print("PASS: all action names match; actual C# extended snapshot -> quantity drop decision -> C# policy; ordinary chat DTO")
     print("PASS: native Ollama settings/status DTOs -> local model list/check/JSON plan -> C# quantity policy; thinking disabled")
     print("PASS: C# loaded ground stack (45m/count=7) -> local pickup plan; give exactly 5 from observed inventory to player -> C# validation")
+    print("PASS: actual C# NPC snapshot/quest/item keys -> Ollama bulk give / exact 7 across 5+3 stacks -> C# policy")
     print("PASS: actual model request/raw reply/validation dialogue -> paged Python endpoints -> C# index/page/export DTOs")
 
 

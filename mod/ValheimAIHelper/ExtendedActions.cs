@@ -22,26 +22,18 @@ internal sealed partial class ActionExecutor
         actionStage = uses = craftsCompleted = 0; actionTime = Time.realtimeSinceStartup; nextUse = 0;
         placementPulse = placementDone = false; placementFailure = "";
         repairBefore = -1;
-        pickupOwnershipStarted = 0;
+        pickupOwnershipStarted = 0; transfer = null;
     }
     private bool ExtendedTick(Player player, Player? leader, bool combat)
     {
         var d = decision!; var o = observation!;
         switch (d.action)
         {
-            case "drop":
-                DropInventoryItem(player, d.target_id); return true;
+            case "drop": TransferItems(player, null); return true;
             case "give":
-                if (!o.Characters.TryGetValue(d.target_id, out var recipient) || !(recipient is Player receiver) || !receiver || receiver==player || receiver.IsDead())
+                if (!o.Characters.TryGetValue(d.target_id, out var recipient) || !(recipient is Player receiver) || !receiver || CompanionNpc.Is(receiver))
                 { Finish("Игрок-получатель не виден или недоступен", false); return true; }
-                if (!o.Items.TryGetValue(d.item_id, out var delivery) || !player.GetInventory().ContainsItem(delivery) || delivery.m_stack < d.amount)
-                { Finish("Не хватает предметов для передачи", false); return true; }
-                if (Vector3.Distance(player.transform.position,receiver.transform.position)>2.5f)
-                { actionStage=0;MoveTo(player,receiver.transform.position,2);if(ActionStatus=="success")ActionStatus="running";return true; }
-                if (actionStage==0) { actionStage=1;nextUse=Time.realtimeSinceStartup+.35f; }
-                Controls(Vector3.zero,receiver.transform.position-player.transform.position);
-                if (Time.realtimeSinceStartup>=nextUse) DropInventoryItem(player,d.item_id,"Рядом с " + Observation.Name(receiver.GetPlayerName()) + " оставлено");
-                return true;
+                TransferItems(player, receiver); return true;
             case "unequip":
                 if (!o.Items.TryGetValue(d.target_id, out var unequip) || !player.GetInventory().ContainsItem(unequip)) { Finish("Предмет отсутствует", false); return true; }
                 if (!unequip.m_equipped) { Finish("Предмет снят"); return true; }
@@ -118,17 +110,6 @@ internal sealed partial class ActionExecutor
         int added=bag.GetAllItems().Where(i=>i.m_shared.m_name==name&&i.m_quality==quality).Sum(i=>i.m_stack)-before;
         Finish(added>0?"Подобрано: "+Observation.Name(name)+" ×"+added:accepted?"Игра ещё не подтвердила изменение инвентаря":"Игра отклонила подбор предмета",added>0);
     }
-    private void DropInventoryItem(Player player,string id,string verb="Сброшено")
-    {
-        var d=decision!;var bag=player.GetInventory();
-        if(!observation!.Items.TryGetValue(id,out var item)||!bag.ContainsItem(item)||d.amount<1||d.amount>item.m_stack)
-        { Finish("Неверное количество или предмет уже отсутствует",false);return; }
-        if(item.m_shared.m_questItem) { Finish("Квестовый предмет нельзя сбросить или передать",false);return; }
-        string name=Observation.Name(item.m_shared.m_name);int before=item.m_stack;
-        bool accepted=player.DropItem(bag,item,d.amount);
-        int removed=before-(bag.ContainsItem(item)?item.m_stack:0);
-        Finish(accepted&&removed==d.amount?verb+": "+name+" ×"+removed:"Игра не подтвердила сброс запрошенного количества",accepted&&removed==d.amount);
-    }
     private void Gather(Player player)
     {
         var d = decision!;
@@ -179,7 +160,7 @@ internal sealed partial class ActionExecutor
         if (!NativeInventorySession.HasAccess(player, container))
         { if (Time.realtimeSinceStartup - actionTime > 5) { inventorySession.Close(); Finish("Игра не предоставила доступ/владение контейнером", false); } return; }
         if (d.action == "open") { Finish("Контейнер открыт; содержимое доступно в следующем наблюдении"); return; }
-        if (d.action == "stack") { NativeAccess.Call(InventoryGui.instance, "OnStackAll"); Finish("Сложены совпадающие стопки через интерфейс игры"); return; }
+        if (d.action == "stack") { int total = NativeInventorySession.Stack(player, container); Finish("Сложено предметов: " + total); return; }
         var items = d.action == "take" ? o.ContainerItems : o.Items;
         if (!items.TryGetValue(d.item_id, out var item)) { Finish("Выбранный предмет отсутствует", false); return; }
         int moved = NativeInventorySession.Transfer(player, container, item, d.amount, d.action == "deposit");
@@ -200,16 +181,21 @@ internal sealed partial class ActionExecutor
         int quality = upgrade != null ? upgrade.m_quality + 1 : 1;
         if (actionStage == 0)
         {
+            NpcInventory.FindStation(player, recipe);
             if (!player.HaveRequirements(recipe, false, quality)) { Finish("Игра не разрешает крафт: нужны материалы/уровень станции", false); return; }
             baseCount = player.GetInventory().CountItems(name); baseQuality = upgrade?.m_quality ?? 0;
             usedItem = upgrade; craftPosition = upgrade?.m_gridPos ?? new Vector2i(-1, -1);
-            if (!inventorySession.Craft(player, recipe, upgrade)) { Finish("Кнопка крафта недоступна: проверьте станцию, ресурсы и место", false); return; }
-            actionStage = 1;
+            actionStage = 1; nextUse = Time.realtimeSinceStartup + 2;
         }
-        else if (CraftComplete(player, name, upgrade != null)) CompleteCraftOperation(upgrade != null);
+        else if (Time.realtimeSinceStartup >= nextUse)
+        {
+            if (!NpcInventory.Craft(player, recipe, upgrade)) { Finish("Крафт недоступен: ресурсы, станция, место или особый рецепт с выбором ингредиента", false); return; }
+            if (CraftComplete(player, name, upgrade != null)) CompleteCraftOperation(upgrade != null);
+            else Finish("Результат крафта не подтверждён", false);
+        }
         else if (Time.realtimeSinceStartup - actionTime > Math.Min(55, d.amount * 5 + 5)) { inventorySession.Close(); Finish("Игра не подтвердила результат крафта", false); }
     }
-    private bool CraftComplete(Player player, string name, bool upgrade) => NativeAccess.Read(InventoryGui.instance, "m_craftTimer") is float timer && timer < 0 && (upgrade
+    private bool CraftComplete(Player player, string name, bool upgrade) => (upgrade
         ? player.GetInventory().GetAllItems().Any(i => i.m_shared.m_name == name && i.m_quality > baseQuality && i.m_gridPos == craftPosition)
         : player.GetInventory().CountItems(name) > baseCount);
     private void CompleteCraftOperation(bool upgrade)
@@ -236,12 +222,8 @@ internal sealed partial class ActionExecutor
     {
         if (!observation!.Interactables.TryGetValue(decision!.target_id, out var target) || !(target is CraftingStation station)) { Finish("Станция недоступна", false); return; }
         if (Vector3.Distance(player.transform.position, station.transform.position) > 2.5f) { MoveTo(player, station.transform.position, 1.8f); return; }
-        if (actionStage++ == 0) { inventorySession.AdoptStation(); station.Interact(player, false, false); }
-        if (!InventoryGui.IsVisible() || player.GetCurrentCraftingStation() != station || !station.CheckUsable(player, false))
-        { if (Time.realtimeSinceStartup - actionTime > 5) { inventorySession.Close(); Finish("Станция не готова: укрытие/огонь/доступ", false); } return; }
-        if (Time.time < nextUse) return; nextUse = Time.time + .3f;
-        if (NativeAccess.Call(InventoryGui.instance, "HaveRepairableItems") is not true) { inventorySession.Close(); Finish("Все доступные этой станции предметы отремонтированы"); return; }
-        NativeAccess.Call(InventoryGui.instance, "OnRepairPressed");
+        int repaired = NpcInventory.Repair(player, station);
+        Finish(repaired >= 0 ? "Ремонт NPC: исправлено предметов " + repaired : "Станция недоступна: укрытие, огонь, уровень или доступ", repaired >= 0);
     }
     private void Placement(Player player)
     {

@@ -18,6 +18,8 @@ public static class LeaderCommand
         command = canonical.Remove(match.Index, match.Length).Trim(' ', ',', ':', ';', '!', '?', '.', '—', '-');
         return true;
     }
+    public static bool IsDirectFollow(string text) => string.Equals(text.Trim().TrimEnd('.', '!', '?').Trim(), "следуй за мной", StringComparison.OrdinalIgnoreCase);
+
     public static string? Parse(string text)
     {
         text = text.Trim();

@@ -14,11 +14,12 @@ if (args.Length > 1 && args[0] == "--check-game-access")
     foreach (var handle in metadata.MemberReferences)
     {
         var member = metadata.GetMemberReference(handle);
-        if (metadata.GetString(member.Name) == "GetRightItem")
-        { Console.Error.WriteLine("Inaccessible direct game call: Humanoid.GetRightItem (protected in the runtime)"); return 1; }
+        if (metadata.GetString(member.Name) == "GetRightItem" || metadata.GetString(member.Name) == "SetLocalPlayer")
+        { Console.Error.WriteLine("Forbidden direct game call: GetRightItem / SetLocalPlayer"); return 1; }
     }
-    Console.WriteLine("GAME_ACCESS_OK: no direct reference to protected GetRightItem"); return 0;
+    Console.WriteLine("GAME_ACCESS_OK: no direct call to protected GetRightItem or SetLocalPlayer"); return 0;
 }
+if (args.Length > 0 && args[0] == "--npc-capabilities") { Console.WriteLine(WireJson.Serialize(Capabilities.NpcSupported(true))); return 0; }
 if (args.Length > 0 && args[0] == "--capabilities") { Console.WriteLine(WireJson.Serialize(Capabilities.All)); return 0; }
 if (args.Length > 0 && args[0] == "--ui-ollama")
 {
@@ -39,7 +40,7 @@ if (args.Length > 0 && args[0] == "--read-dialogue-index")
 if (args.Length > 0 && args[0] == "--read-dialogue-page")
 {
     var page=WireJson.Deserialize<DialoguePage>(Console.In.ReadToEnd());
-    if(page.part!="response"||!page.text.Contains("pickup")||page.pages<1)return 1;
+    if(page.part!="response"||!(page.text.Contains("pickup") || page.text.Contains("give"))||page.pages<1)return 1;
     Console.WriteLine("DIALOGUE_PAGE_OK");return 0;
 }
 if (args.Length > 0 && args[0] == "--read-dialogue-export")
@@ -111,6 +112,29 @@ if (args.Length > 0 && args[0].Contains("extended"))
     snapshot.ground_scan_radius=128;snapshot.ground_items_total=1;
     snapshot.entities = new[] {snapshot.entities[0], new Entity {id="drop:far",name="Камень",kind="item",count=7,weight=14,distance=45,
         position=new Position {x=snapshot.actor.position.x+45,y=snapshot.actor.position.y,z=snapshot.actor.position.z}}};
+}
+if (args.Length > 0 && args[0].Contains("npc-extended"))
+{
+    snapshot.supported_actions = Capabilities.NpcSupported(true);
+    snapshot.actor.name = "Гоша";
+    snapshot.actor.inventory = new[] {
+        new InventoryEntry { id="stone1", item_key="Stone:1:0", name="Камень", count=5 },
+        new InventoryEntry { id="stone2", item_key="Stone:1:0", name="Камень", count=3 },
+        new InventoryEntry { id="club", item_key="Club:1:0", name="Дубина", count=1, equipped=true },
+        new InventoryEntry { id="quest", name="Квест", count=1, quest=true },
+    };
+}
+if (args.Length > 0 && args[0] == "--check-bulk-npc-extended-response")
+{
+    var decision=WireJson.Deserialize<Decision>(Console.In.ReadToEnd());
+    if(!DecisionPolicy.Accept(decision,snapshot,false)||decision.action!="give"||decision.selection!="all_inventory"||decision.item_id!="")return 1;
+    Console.WriteLine("NPC_BULK_ACCEPTED"); return 0;
+}
+if (args.Length > 0 && args[0] == "--check-quantity-npc-extended-response")
+{
+    var decision=WireJson.Deserialize<Decision>(Console.In.ReadToEnd());
+    if(!DecisionPolicy.Accept(decision,snapshot,false)||decision.action!="give"||decision.item_id!="stone1"||decision.amount!=7)return 1;
+    Console.WriteLine("NPC_QUANTITY_ACCEPTED:7"); return 0;
 }
 if (args.Length > 0 && args[0] == "--check-response")
 {

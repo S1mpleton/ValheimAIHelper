@@ -525,11 +525,14 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     async def leader_chat(value: ChatRequest):
         if not state.chat_listening:
             return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
+        if state.command.mode == "ai" and any(m["speaker"] == value.speaker and m["text"] == value.text and m["explicit_address"] == value.explicit_address for m in state.pending_chat):
+            return {"handled": False, "queued": True, "mode": "ignore", "objective": "", "reply": ""}
         state.chat_id += 1
         line = {"id": state.chat_id, "speaker": value.speaker, "text": value.text, "explicit_address": value.explicit_address}
         state.chat_history.append(line)
         state.event("leader-chat", value.speaker + ": " + value.text)
         if state.command.mode == "ai":
+            if value.explicit_address: state.pending_chat.clear()
             state.pending_chat.append(line)
             if value.explicit_address:
                 # Addressing by name is already verified by the mod. Do not

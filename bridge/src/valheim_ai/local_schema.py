@@ -37,6 +37,7 @@ def action_schema(snapshot, planning, chat=(), history=()):
         if not ids: continue
         names = ["action", "target_id", "duration", "say", "amount"]
         if action in ("give", "take", "deposit", "use_on", "upgrade"): names.append("item_id")
+        if action in ("give", "drop"): names.append("selection")
         if action in ("speak", "emote"): names.append("text")
         args = {name: deepcopy(properties[name]) for name in names}
         args["action"] = {"const": action, "type": "string"}
@@ -52,7 +53,16 @@ def action_schema(snapshot, planning, chat=(), history=()):
                 args["destination"] = {"$ref": "#/$defs/Vec3"}; names.append("destination")
         if action in ("move", "jump", "follow", "pickup", "give"): args["run"] = {"type": "boolean"}
         if action == "build": args["rotation"] = deepcopy(properties["rotation"])
-        variants.append({"type": "object", "properties": args, "required": names, "additionalProperties": False})
+        if action in ("give", "drop"):
+            args["selection"] = {"type": "string", "enum": ["exact", "all_matching"]}
+        variant = {"type": "object", "properties": args, "required": names, "additionalProperties": False}
+        variants.append(variant)
+        if action in ("give", "drop") and any(not i.quest for i in inventory):
+            bulk = deepcopy(variant)
+            bulk["properties"]["selection"] = {"type": "string", "const": "all_inventory"}
+            bulk["properties"]["item_id" if action == "give" else "target_id"] = {"type": "string", "const": ""}
+            bulk["properties"]["amount"] = {"type": "integer", "const": 1}
+            variants.append(bulk)
     if planning:
         schema["$defs"]["Decision"] = {"anyOf": variants}
         schema["required"] = ["steps", "chat_intent", "combat_policy", "objective_complete"]

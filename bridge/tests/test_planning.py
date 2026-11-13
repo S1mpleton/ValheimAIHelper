@@ -16,7 +16,7 @@ async def configure(c, snapshot):
     snapshot["supported_actions"] = ["wait", "follow", "move", "jump", "attack", "defend", "flee", "dodge", "pickup", "interact", "eat", "equip", "use"]
     assert (await c.post("/api/decision", json=snapshot)).status_code == 200
     await c.post("/api/provider", json={"provider": "openai", "model": "gpt-6-luna", "api_key": "mock-secret", "request_interval_seconds": 20})
-    await c.post("/api/command", json={"mode": "ai", "objective": "Следуй, защищай и выживай"})
+    await c.post("/api/command", json={"mode": "ai", "objective": "Следуй за лидером и помогай ему выжить."})
 
 
 async def poll(c, snapshot, **feedback):

@@ -16,7 +16,7 @@ public sealed partial class Plugin
         var leader = controlByAllPlayers.Value ? null : FindLeader();
         foreach (var player in Player.GetAllPlayers())
         {
-            if (!player || (player == Player.m_localPlayer && !controlByAllPlayers.Value) || player.IsDead() || (go && go.GetComponent<Player>() != player)) continue;
+            if (!player || CompanionNpc.Is(player) || player.IsDead() || (go && go.GetComponent<Player>() != player)) continue;
             var view = player.GetComponent<ZNetView>();
             if (view && view.IsValid() && ChatControlPolicy.Allows(controlByAllPlayers.Value, leader ? leader!.GetPlayerID() : (long?)null,
                 player.GetPlayerID(), view.GetZDO().GetOwner(), sender)) return player;
@@ -32,13 +32,13 @@ public sealed partial class Plugin
     {
         var view = speaker.GetComponent<ZNetView>();
         while (chatQueue.Count >= 6) chatQueue.Dequeue();
-        chatQueue.Enqueue(new LeaderChatRequest { actor_name = Player.m_localPlayer.GetPlayerName(), speaker = speaker.GetPlayerName(),
+        chatQueue.Enqueue(new LeaderChatRequest { actor_name = CurrentNpc ? CurrentNpc!.GetPlayerName() : npcName.Value, speaker = speaker.GetPlayerName(),
             text = text, explicit_address = explicitAddress, SenderPlayerId = speaker.GetPlayerID(), SenderOwner = view.GetZDO().GetOwner() });
         if (!processingChat) StartCoroutine(ProcessOrdinaryChat());
     }
     private void FollowChatSpeaker(Player speaker)
     {
-        if (!controlByAllPlayers.Value || speaker == Player.m_localPlayer) return;
+        if (!controlByAllPlayers.Value && leaderId.HasValue && leaderId != speaker.GetPlayerID()) return;
         leaderName.Value = speaker.GetPlayerName(); leaderId = speaker.GetPlayerID();
         AddLog("leader", "Следование за отправителем команды: " + speaker.GetPlayerName());
     }
@@ -56,7 +56,8 @@ public sealed partial class Plugin
         if (text.Length == 0 || text.Length > 1000 || text.StartsWith("[AI]", StringComparison.Ordinal)) return;
         var speaker = plugin.ChatSpeaker(go, sender);
         if (!speaker) return;
-        bool addressed = LeaderCommand.Addressed(text, Player.m_localPlayer.GetPlayerName(), out string command);
+        bool addressed = LeaderCommand.Addressed(text, plugin.CurrentNpc ? plugin.CurrentNpc!.GetPlayerName() : plugin.npcName.Value, out string command);
+        if (!addressed && LeaderCommand.IsDirectFollow(text)) { addressed = true; command = text.Trim(); }
         if (!addressed)
         {
             if (plugin.CanInferChat)
@@ -67,12 +68,12 @@ public sealed partial class Plugin
         }
         string normalized = command.ToLowerInvariant();
         if (normalized is "стоп" or "stop" or "стой" or "остановись")
-        { plugin.StopFromPanel(); plugin.ChatReply("Остановлен. Управление возвращено игроку."); return; }
+        { plugin.StopFromPanel(); plugin.ChatReply("Остановлен."); return; }
         if (Time.realtimeSinceStartup - plugin.lastChatCommand < 1) return;
         plugin.lastChatCommand = Time.realtimeSinceStartup;
         plugin.AddLog("player-chat", speaker!.GetPlayerName() + ": " + command);
         if (normalized is "" or "помощь" or "help")
-        { plugin.ChatReply("Обратитесь ко мне по имени: «" + Player.m_localPlayer.GetPlayerName() + ", подбери камни». Можно также продолжать разговор без имени."); return; }
+        { plugin.ChatReply("Обратитесь ко мне по имени: «" + plugin.npcName.Value + ", подбери камни». Можно также продолжать разговор без имени."); return; }
         if (normalized is "статус" or "status")
         { plugin.ChatReply(plugin.active ? plugin.executor.Result : "Остановлен. " + plugin.uiError); return; }
         if (normalized is "бой вкл" or "бой выкл" or "не сражайся" or "не атакуй" or "избегай боя")
@@ -80,16 +81,14 @@ public sealed partial class Plugin
         if (normalized is "еда вкл" or "еда выкл")
         { plugin.autoSurvival.Value = normalized == "еда вкл"; plugin.ChatReply(plugin.autoSurvival.Value ? "Автоматическая еда включена." : "Автоматическая еда выключена."); return; }
         if (plugin.uiBusy) { plugin.ChatReply("Выполняется настройка AI. Повторите команду через несколько секунд; стоп доступен всегда."); return; }
-        string mode = normalized is "следуй" or "следуй за мной" or "за мной" or "follow" ? "follow" : "ai";
-        if (mode == "follow" && speaker == Player.m_localPlayer)
-        { plugin.ChatReply("Выберите другого игрока лидером: следовать за собой невозможно."); return; }
+        string mode = LeaderCommand.IsDirectFollow(normalized) ? "follow" : "ai";
         if (mode == "ai" && plugin.active && plugin.requestedMode == "ai" && plugin.CanInferChat)
         {
             plugin.QueueChat(speaker, text, true);
             return;
         }
         if (mode == "follow") plugin.FollowChatSpeaker(speaker);
-        if (mode == "ai") plugin.uiObjective = command;
+        if (mode == "ai") { plugin.FollowChatSpeaker(speaker); plugin.uiObjective = "Поручение игрока " + speaker.GetPlayerName() + ": " + command; }
         plugin.StartCoroutine(plugin.CommandFromChat(mode));
     }
     private IEnumerator ProcessOrdinaryChat()
@@ -109,8 +108,6 @@ public sealed partial class Plugin
                 else if (reply.mode is "task" or "follow")
                 {
                     if (uiBusy) continue;
-                    if (reply.mode == "follow" && QueuedSpeaker(request) == Player.m_localPlayer)
-                    { ChatReply("Выберите другого игрока лидером: следовать за собой невозможно."); continue; }
                     if (reply.mode == "follow") FollowChatSpeaker(QueuedSpeaker(request)!);
                     if (reply.objective.Length > 0) uiObjective = reply.objective;
                     yield return CommandFromChat(reply.mode == "follow" ? "follow" : "ai");
@@ -131,14 +128,17 @@ public sealed partial class Plugin
         string reply = journal.Redact(text);
         // Upstream diagnostics stay in the local journal; chat acknowledgements are bounded.
         if (reply.Length > 220) reply = reply.Substring(0, 220);
-        if (Chat.instance) Chat.instance.SendText(Talker.Type.Normal, "[AI] " + reply);
+        var npc = actor ? actor : CurrentNpc;
+        var talker = npc ? npc!.GetComponent<Talker>() : null;
+        if (talker) talker!.Say(Talker.Type.Normal, "[AI] " + reply);
+        else if (Chat.instance) Chat.instance.AddString("[AI: " + npcName.Value + "] " + reply);
     }
     private void SelectNextLeader()
     {
         var local = Player.m_localPlayer;
-        var players = Player.GetAllPlayers().FindAll(p => p && p != local && !p.IsDead());
+        var players = Player.GetAllPlayers().FindAll(p => p && !CompanionNpc.Is(p) && !p.IsDead());
         players.Sort((a, b) => string.Compare(a.GetPlayerName(), b.GetPlayerName(), StringComparison.Ordinal));
-        if (players.Count == 0) { uiError = "Других игроков рядом нет. Войдите с лидером в один мир."; return; }
+        if (players.Count == 0) { uiError = "Игроков в мире нет."; return; }
         int index = players.FindIndex(p => leaderId == p.GetPlayerID());
         var selected = players[(index + 1) % players.Count];
         leaderName.Value = selected.GetPlayerName(); leaderId = selected.GetPlayerID();

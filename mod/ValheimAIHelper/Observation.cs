@@ -52,6 +52,7 @@ internal sealed class Observation
         durability=item.m_shared.m_useDurability ? Mathf.Clamp01(item.m_durability/Mathf.Max(1,item.GetMaxDurability())) : 1,
         food_health=ObservationValues.Vital(item.m_shared.m_food), food_stamina=ObservationValues.Vital(item.m_shared.m_foodStamina),
         usable=item.m_shared.m_itemType==ItemDrop.ItemData.ItemType.Consumable,
+        item_key=(item.m_dropPrefab ? item.m_dropPrefab.name : item.m_shared.m_name)+":"+item.m_quality+":"+item.m_variant, quest=item.m_shared.m_questItem,
         can_eat=item.m_shared.m_food>0 && actor.CanEat(item,false), weight=ObservationValues.Vital(item.m_shared.m_weight*item.m_stack),
         tool_tier=Mathf.Clamp(item.m_shared.m_toolTier,0,20), effect=Name(item.m_shared.m_consumeStatusEffect ? item.m_shared.m_consumeStatusEffect.name : ""),
         quality=Mathf.Clamp(item.m_quality,1,100),max_quality=Mathf.Clamp(item.m_shared.m_maxQuality,1,100),
@@ -77,7 +78,7 @@ internal sealed class Observation
             string id=Id(leader);o.Characters[id]=leader;o.Data.leader_id=id;
             entities.Add(new Entity {id=id,name=Name(leader.GetPlayerName()),kind="player",position=Pos(leader.transform.position),distance=Vector3.Distance(origin,leader.transform.position)});
         }
-        foreach(var other in Player.GetAllPlayers().Where(p=>p && p!=actor && p!=leader && !p.IsDead() && Vector3.Distance(origin,p.transform.position)<=60)
+        foreach(var other in Player.GetAllPlayers().Where(p=>p && !CompanionNpc.Is(p) && p!=actor && p!=leader && !p.IsDead() && Vector3.Distance(origin,p.transform.position)<=60)
             .OrderBy(p=>Vector3.SqrMagnitude(origin-p.transform.position)).Take(15))
         {
             string id=Id(other);o.Characters[id]=other;

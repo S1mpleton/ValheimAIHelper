@@ -20,7 +20,7 @@ public sealed partial class Plugin
         private readonly List<Component> busyButtons = new();
         private readonly List<Component> tabs = new();
         private readonly List<GameObject> tabMarkers = new();
-        private Component? stateLabel, messageLabel, leaderLabel, combatButton, foodButton, controlButton, logText;
+        private Component? npcInput, npcLabel, stateLabel, messageLabel, leaderLabel, combatButton, foodButton, controlButton, logText;
         private Component? keyInput, modelInput, intervalInput, providerButton, keyStatusLabel, credentialLabel, usageLabel, performanceLabel;
         private Component? dialogueHeader, dialogueBody, dialoguePageLabel, dialogueCopy, dialogueSave;
         private readonly List<Component> dialogueTabs = new();
@@ -213,8 +213,11 @@ public sealed partial class Plugin
             var main = characterMain.transform; var advanced = characterAdvanced.transform;
             leaderLabel = Label(main, "", 0, 0, 535, 32);
             Button(main, "Сменить лидера", 552, 0, 260, p.SelectNextLeader);
-            string name = Player.m_localPlayer ? Player.m_localPlayer.GetPlayerName() : "Бъерн";
-            Label(main, "Поручения — в игровом чате.\nНапример: «" + name + ", подбери камни».\nПродолжения без имени AI разбирает по контексту. Дальние сообщения — /s.", 0, 72, 812, 100);
+            string name = p.npcName.Value;
+            npcInput = InputField(main, p.npcName.Value, 0, 48, 300, 36, 40, value => p.npcName.Value = value.Trim());
+            Button(main, "Создать / найти NPC", 318, 48, 270, p.CreateNpcFromPanel, true);
+            npcLabel = Label(main, "", 0, 96, 812, 30, 16);
+            Label(main, "Поручения — в чате: «" + name + ", дай мне 5 камней».\n«Следуй за мной» — сразу; другие формулировки разбирает AI.", 0, 132, 812, 56, 16);
             Button(main, "Следовать", 0, 192, 260, () => p.StartCoroutine(p.StartMode("follow")), true);
             Button(main, "Включить AI", 276, 192, 260, () => { p.uiObjective = CompanionObjective; p.StartCoroutine(p.StartMode("ai")); }, true);
             Button(main, "Стоп", 552, 192, 260, p.StopFromPanel);
@@ -310,10 +313,11 @@ public sealed partial class Plugin
             Set(canvas!, "scaleFactor", nativeScale);
             Vector2 settings = Menu.instance ? GameUi.SettingsSize(Menu.instance) : Vector2.zero;
             frame!.transform.localScale = Vector3.one * UiLayout.Fit(Screen.width / nativeScale, Screen.height / nativeScale, settings.x, settings.y);
-            Set(stateLabel!, "text", !p.active ? "Ручное управление" : p.executor.Result + (p.bridgeStatus?.performance?.current != null ? " · AI: " + p.bridgeStatus.performance.current.elapsed_seconds?.ToString("0") + " с" : ""));
+            Set(stateLabel!, "text", !p.active ? "NPC остановлен; ваш персонаж — под вашим управлением" : p.executor.Result + (p.bridgeStatus?.performance?.current != null ? " · AI: " + p.bridgeStatus.performance.current.elapsed_seconds?.ToString("0") + " с" : ""));
             Set(messageLabel!, "text", p.journal.Redact(p.uiError.Length > 0 ? p.uiError : p.uiMessage));
             Set(messageLabel!, "color", p.uiError.Length > 0 ? new Color(1, .55f, .4f) : new Color(.85f, .75f, .45f));
             var leader = p.FindLeader();
+            if (npcLabel != null) Set(npcLabel, "text", p.CurrentNpc ? "NPC: " + p.CurrentNpc!.GetPlayerName() + " · один клиент" : "NPC ещё не загружен. Создайте его в своём мире (хост).");
             Set(leaderLabel!, "text", "Лидер: " + (leader ? leader!.GetPlayerName() : p.leaderName.Value.Length > 0 ? p.leaderName.Value + " (не виден)" : "не выбран"));
             ButtonText(combatButton, "Бой: " + (p.allowCombat.Value ? "включён" : "выключен"));
             ButtonText(foodButton, "Еда: " + (p.autoSurvival.Value ? "автоматически" : "по команде"));

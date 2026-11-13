@@ -9,8 +9,8 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.6.1</p><h1>Рядом в другом мире.</h1><p>Пульт отдельного персонажа Valheim. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
-  <div id="notice" role="status" aria-live="polite">Для игры нужен второй клиент Valheim. Войдите им в мир, затем включите управление клавишей F8.</div>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.7.0</p><h1>Рядом в другом мире.</h1><p>Пульт NPC-напарника Valheim в вашем мире. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <div id="notice" role="status" aria-live="polite">Один клиент + NPC. В игре: Esc → Управление персонажем → Создать / найти NPC.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
     <p>Откройте файл <code>.local/bridge-token</code> рядом с пусковым скриптом и вставьте код. Это локальный код сопряжения, а не ключ GPT или Gemini.</p>
@@ -44,7 +44,7 @@
         <h2>03 · Задача напарнику</h2>
         <form id="objective-form"><label for="objective">Что нужно делать?</label><textarea id="objective" rows="4" maxlength="1000">Следуй за лидером, подбирай полезные предметы рядом и ешь, когда это нужно. Избегай опасных боёв.</textarea><button id="ai-start">Включить AI</button></form>
         <div class="row controls"><button id="follow" class="secondary">Просто следовать</button><button id="stop" class="danger">Стоп</button></div>
-        <p class="hint">Следование работает без API-ключа. Лидер задаётся по имени в конфигурации мода; без имени выбирается ближайший игрок. F9 в игре немедленно возвращает ручное управление.</p>
+        <p class="hint">Следование работает без API-ключа. Лидер задаётся по имени в конфигурации мода; без имени выбирается локальный игрок. F9 в игре немедленно останавливает NPC.</p>
         <p id="mode" class="status-line">Режим: стоп</p>
       </section>
     </div>

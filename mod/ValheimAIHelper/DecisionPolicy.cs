@@ -22,6 +22,7 @@ public static class DecisionPolicy
         }
         if ((d.action == "drop" || d.action == "give" || d.action == "take" || d.action == "deposit" || d.action == "use_on") && (d.amount < 1 || d.amount > 100000)) return false;
         if (d.text != null && d.text.Length > 220 || d.item_id != null && d.item_id.Length > 100 || d.rotation < 0 || d.rotation > 15) return false;
+        if (!TransferPolicy.ValidSelection(d.selection) || (d.selection != null && d.selection != "" && d.selection != "exact" && d.action != "give" && d.action != "drop")) return false;
         var entity = s.entities.FirstOrDefault(e => e.id == d.target_id);
         allowCombat = allowCombat && !d.avoid_combat;
         var item = s.actor.inventory.FirstOrDefault(i => i.id == d.target_id);
@@ -42,11 +43,11 @@ public static class DecisionPolicy
             case "gather": return entity?.kind == "resource" && InRange(s.actor.position, entity);
             case "defend": case "flee": case "dodge": return entity?.kind == "enemy" && InRange(s.actor.position, entity);
             case "pickup": return entity?.kind == "item" && InRange(s.actor.position, entity, 128);
-            case "give": return entity?.kind == "player" && InRange(s.actor.position, entity, 60) && s.actor.inventory.Any(i => i.id == d.item_id && i.count >= d.amount);
+            case "give": return entity?.kind == "player" && InRange(s.actor.position, entity, 60) && TransferPolicy.Available(s.actor.inventory, d.item_id, d.selection, d.amount);
             case "eat": return item?.food == true && item.can_eat;
             case "equip": return item?.equipable == true;
             case "unequip": return item?.equipable == true;
-            case "drop": return item != null && d.amount <= item.count;
+            case "drop": return TransferPolicy.Available(s.actor.inventory, d.target_id, d.selection, d.amount);
             case "use": return item?.usable == true;
             case "interact": return entity?.kind == "interactable" && InRange(s.actor.position, entity);
             case "use_on": return entity?.kind == "interactable" && InRange(s.actor.position, entity) && s.actor.inventory.Any(i => i.id == d.item_id && i.count >= d.amount);

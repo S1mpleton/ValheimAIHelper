@@ -5,17 +5,22 @@ using UnityEngine;
 
 namespace ValheimAIHelper;
 
-// Native input/UseItem/Interact only. No position, vitals, ownership or inventory writes.
+// Bounded native controls/interactions and checked inventory operations.
+// Navigation never writes world position or velocity.
 internal sealed partial class ActionExecutor
 {
     private Decision? decision;
     private Observation? observation;
     private float expires, nextPath, nextAttack, nextJump, nextSurvival, lastProgress, bowStarted;
-    private Vector3 lastPosition, moveTarget;
+    private Vector3 lastPosition, moveTarget, lastPathGoal;
+    private float pathFailedSince = -1;
+    private int pathFailures;
+    private float blockedAt;
     private readonly List<Vector3> path = new();
     private ItemDrop.ItemData? usedItem;
     private int oldStack;
     private float usedAt;
+    public int CompletedAmount { get; private set; }
     public string Result { get; private set; } = "Ожидание";
     public string PlanId { get; private set; } = "";
     public string ActionStatus { get; private set; } = "";
@@ -26,12 +31,12 @@ internal sealed partial class ActionExecutor
         bool same = decision != null && (value.plan_id ?? "") == PlanId && decision.action == value.action && decision.target_id == value.target_id && decision.source == value.source && decision.mode == value.mode;
         observation = from;
         expires = Time.realtimeSinceStartup + value.duration;
-        if (same) { decision = value; return; } // Renew policy/flags while preserving execution state.
-        ResetExtended(value);
+        if (same && !(value.action == "follow" && ActionStatus == "blocked" && Time.time - blockedAt >= 8)) { decision = value; return; } // Renew policy/flags while preserving execution state.
+        ResetExtended(value); CompletedAmount = 0;
         decision = value;
         PlanId = value.plan_id ?? "";
         ActionStatus = "running";
-        nextPath = 0; bowStarted = 0; usedItem = null;
+        nextPath = 0; bowStarted = 0; usedItem = null; pathFailedSince = -1; pathFailures = 0; lastPathGoal = new Vector3(float.MaxValue, 0, 0);
         lastProgress = Time.time;
         lastPosition = player.transform.position;
         var forward = player.transform.forward; forward.y = 0;
@@ -42,14 +47,15 @@ internal sealed partial class ActionExecutor
 
     public void Stop(Player? player, string reason)
     {
-        decision = null; observation = null; PlanId = ""; ActionStatus = "";
+        decision = null; observation = null; PlanId = ""; ActionStatus = ""; CompletedAmount = 0;
         inventorySession.Close(); placementPulse = false;
+        transfer = null;
         path.Clear(); bowStarted = 0; usedItem = null;
         Result = reason; Input = default;
     }
 
     private void Finish(string result, bool success = true)
-    { Result = result; ActionStatus = success ? "success" : "blocked"; Input = default; }
+    { Result = result; ActionStatus = success ? "success" : "blocked"; if (!success) blockedAt = Time.time; Input = default; }
     public void Pause() { Input = default; lastProgress = Time.time; nextPath = 0; }
 
     public ControlIntent ConsumeInput()
@@ -68,8 +74,8 @@ internal sealed partial class ActionExecutor
     {
         Input = default;
         if (decision == null || observation == null) return;
-        if (Time.realtimeSinceStartup >= expires) { Finish("Нет свежих данных от службы; управление приостановлено", false); return; }
-        if (!player.IsOwner() || player != Player.m_localPlayer || player.IsDead() || player.IsTeleporting() ||
+        if (Time.realtimeSinceStartup >= expires) { if (ActionStatus == "running") Finish("Нет свежих данных от службы; управление приостановлено", false); return; }
+        if (!player.IsOwner() || player == Player.m_localPlayer || !CompanionNpc.Is(player) || player.IsDead() || player.IsTeleporting() ||
             (player.IsAttached() && decision.action != "stand" && decision.action != "sleep") ||
             (player.IsSleeping() && decision.action != "sleep"))
         { Finish("Действие недоступно в текущем состоянии", false); return; }
@@ -81,8 +87,8 @@ internal sealed partial class ActionExecutor
                 Vector3.Distance(c.transform.position, player.transform.position) < 5).FirstOrDefault();
             if (danger) { inventorySession.Close(); Retreat(player, danger, leader); return; }
         }
-        if (survival && !new[] { "eat", "use", "drop", "deposit", "use_on", "craft", "upgrade" }.Contains(decision.action)) PrepareSurvival(player);
-        if (allowCombat && new[] { "follow", "wait", "move", "pickup", "interact", "gather", "rest", "open", "take", "deposit", "craft", "repair", "build", "repair_building" }.Contains(decision.action))
+        if (survival && !new[] { "eat", "use", "drop", "give", "deposit", "use_on", "craft", "upgrade" }.Contains(decision.action)) PrepareSurvival(player);
+        if (allowCombat && new[] { "follow", "wait", "move", "pickup", "give", "interact", "gather", "rest", "open", "take", "deposit", "craft", "repair", "build", "repair_building" }.Contains(decision.action))
         {
             var threat = Character.GetAllCharacters().Where(c => Observation.IsEnemy(player, c, leader))
                 .Where(c => { var victim = c.GetBaseAI()?.GetTargetCreature(); return victim == player || (leader && victim == leader); })
@@ -128,7 +134,10 @@ internal sealed partial class ActionExecutor
                 if (Vector3.Distance(player.transform.position, target.transform.position) > 2) MoveTo(player, target.transform.position, 1.5f);
                 else
                 {
-                    bool ok = target is Interactable interactable && interactable.Interact(player, false, false);
+                    bool ok;
+                    if (target is Container container) { inventorySession.Open(player, container); ok = NativeInventorySession.HasAccess(player, container); }
+                    else if (target is CraftingStation station) ok = NpcInventory.SelectStation(player, station);
+                    else ok = !(target is Bed) && target is Interactable interactable && interactable.Interact(player, false, false);
                     Finish(ok ? "Объект использован" : "Игра отклонила взаимодействие", ok);
                 }
                 return;
@@ -227,23 +236,55 @@ internal sealed partial class ActionExecutor
     {
         var origin = player.transform.position;
         float distance = Vector3.Distance(origin, target);
-        if (distance <= stopDistance) { lastProgress = Time.time; lastPosition = origin; Finish("Точка достигнута"); return; }
+        var delta = target - origin;
+        if (NavigationPolicy.Reached(new Vector2(delta.x, delta.z).magnitude, delta.y, stopDistance))
+        { lastProgress = Time.time; lastPosition = origin; Finish("Точка достигнута"); return; }
         if (player.IsEncumbered()) { Finish("Перегрузка инвентаря", false); return; }
-        if (distance > maxDistance || !Pathfinding.instance) { Finish("Нет доступного маршрута", false); return; }
-        if (Time.time >= nextPath)
+        if (distance > maxDistance || !Pathfinding.instance) { Finish("Цель за пределами доступной навигации", false); return; }
+        bool movingGoal = Vector3.Distance(target, lastPathGoal) > 1.5f;
+        if (Time.time >= nextPath || movingGoal)
         {
-            path.Clear(); nextPath = Time.time + .75f;
-            if (!Pathfinding.instance.GetPath(origin, target, path, Pathfinding.AgentType.HumanoidNoSwim, true))
-            { Finish("Игра не нашла пеший маршрут", false); return; }
+            path.Clear(); nextPath = Time.time + .9f; lastPathGoal = target;
+            bool found = false;
+            // Native navmesh tiles may still be building. Try a full route to
+            // the goal and nearby approach points instead of walking a partial
+            // path or declaring failure on the first unavailable tile.
+            for (int candidate = 0; candidate < 9 && !found; candidate++)
+            {
+                float angle = candidate * Mathf.PI / 4;
+                var point = candidate == 0 ? target : target + new Vector3(Mathf.Cos(angle), 0, Mathf.Sin(angle)) * Mathf.Min(stopDistance * .75f, 1.4f);
+                if (Physics.Raycast(point + Vector3.up * 2, Vector3.down, out var hit, 4,
+                    LayerMask.GetMask("Default", "static_solid", "terrain", "piece"), QueryTriggerInteraction.Ignore) && Mathf.Abs(hit.point.y - target.y) < 1.2f)
+                    point.y = hit.point.y;
+                path.Clear();
+                found = Pathfinding.instance.GetPath(origin, point, path, Pathfinding.AgentType.HumanoidNoSwim, true) && path.Count > 0;
+            }
+            if (!found)
+            {
+                if (pathFailedSince < 0) pathFailedSince = Time.time;
+                pathFailures++;
+                if (!NavigationPolicy.Retry(Time.time - pathFailedSince, pathFailures)) Finish("Пеший маршрут не найден после повторов: препятствие, вода или недоступный этаж", false);
+                else Result = "Ожидаю навигацию игры; ищу обход (" + pathFailures + "/8)";
+                return;
+            }
+            pathFailedSince = -1; pathFailures = 0;
         }
-        while (path.Count > 0 && Vector3.Distance(origin, path[0]) < .6f) path.RemoveAt(0);
-        if (path.Count == 0) return;
-        if (Mathf.Abs(path[0].y - origin.y) > 1.8f) { Finish("Маршрут требует обхода перепада высоты", false); return; }
+        while (path.Count > 0 && NavigationPolicy.Reached(new Vector2(path[0].x - origin.x, path[0].z - origin.z).magnitude, path[0].y - origin.y, .55f)) path.RemoveAt(0);
+        if (path.Count == 0) { nextPath = 0; return; }
+        var segment = path[0] - origin;
+        if (NavigationPolicy.UnsafeSegment(new Vector2(segment.x, segment.z).magnitude, segment.y))
+        {
+            if (pathFailedSince < 0) pathFailedSince = Time.time;
+            pathFailures++; nextPath = 0;
+            if (Time.time - lastProgress > 8) Finish("Безопасного перехода между уровнями нет; нужна лестница или другой подход", false);
+            else Result = "Перестраиваю маршрут вокруг перепада высоты";
+            return;
+        }
         if (Vector3.Distance(origin, lastPosition) > .25f) { lastPosition = origin; lastProgress = Time.time; }
-        bool jump = Time.time - lastProgress > 1.2f && Time.time >= nextJump && player.IsOnGround() && player.GetStamina() > 25;
-        if (jump) nextJump = Time.time + 2;
-        if (Time.time - lastProgress > 4) { Finish("Застрял: маршрут заблокирован", false); return; }
-        var direction = path[0] - origin; direction.y = 0;
-        Controls(direction.normalized, jump: jump, run: run && player.GetStamina() > 30 && !player.IsSwimming());
+        bool jump = Time.time - lastProgress > 2 && Time.time >= nextJump && player.IsOnGround() && player.GetStamina() > 25;
+        if (jump) { nextJump = Time.time + 3; nextPath = 0; }
+        if (Time.time - lastProgress > 8) { Finish("NPC застрял: повторный поиск и прыжок не дали продвижения", false); return; }
+        segment.y = 0;
+        Controls(segment.normalized, jump: jump, run: run && player.GetStamina() > 30 && !player.IsSwimming());
     }
 }

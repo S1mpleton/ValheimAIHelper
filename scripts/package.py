@@ -35,13 +35,15 @@ def main():
                          "1. Close Valheim. Install BepInExPack Valheim if missing.\r\n"
                          "2. Remove old BepInEx/plugins/ValheimAIHelper.dll to avoid a duplicate plugin.\r\n"
                          "3. Copy this BepInEx folder into the Valheim game directory. Keep runtime and _internal folders.\r\n"
-                         "4. Start Valheim, enter a world, press Esc -> Character control (F8).\r\n"
+                         "4. Start ONE Valheim client, enter your own world (host), press Esc -> Character control (F8).\r\n"
+                         "5. Set NPC name and click Create / find NPC. Your own player stays under manual control.\r\n"
                          "The local AI service starts and stops with the game. No Python/PowerShell needed.\r\n"
                          "Choose Ollama (local), OpenAI or Gemini in the game. Cloud keys remain in memory.\r\n"
                          "Ollama: start it on this PC and install a local text model first. Default http://127.0.0.1:11434.\r\n"
                          "No API key needed for Ollama. Thinking is disabled (think=false). Models are not bundled.\r\n"
-                         "Leader chat: address the character by name, e.g. Bjorn, pick up stones.\r\n"
-                         "Ordinary follow-up messages are interpreted from context. F9: emergency stop.\r\n")
+                         "Leader chat: address the NPC by name, e.g. Gosha, pick up stones.\r\n"
+                         "Only the exact Russian follow command is immediate; paraphrases are interpreted by AI.\r\n"
+                         "F9 stops the NPC. No second client/account required. See docs/npc.md.\r\n")
     checksum = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".zip.sha256").write_text(f"{checksum}  {output.name}\n", encoding="ascii")
     print(output)

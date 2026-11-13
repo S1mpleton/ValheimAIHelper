@@ -3,9 +3,8 @@ using UnityEngine;
 
 namespace ValheimAIHelper;
 
-// Leave PlayerController enabled. Replace only the local helper's input at the same
-// SetControls boundary that the native controller uses. Player, Rigidbody and ZSync
-// updates continue to run normally on every client, including cross-play clients.
+// Only blocks the HUMAN input while our settings panel has focus. The NPC
+// motor applies its own native controls directly, without replacing human input.
 [HarmonyPatch(typeof(Player), nameof(Player.SetControls))]
 internal static class ControlInputPatch
 {

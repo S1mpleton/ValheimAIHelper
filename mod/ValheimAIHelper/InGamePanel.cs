@@ -259,7 +259,7 @@ public sealed partial class Plugin
     {
         ++uiOperation;
         chatQueue.Clear();
-        DisableControl("Помощник остановлен. Управление возвращено вам.");
+        DisableControl("NPC остановлен.");
         uiClient?.Dispose();
         CreateUiClient();
         uiBusy = true; uiError = ""; uiMessage = "Помощник остановлен.";
@@ -364,6 +364,9 @@ public sealed partial class Plugin
         }
         else
         {
+        GUILayout.Label("Один клиент + NPC. Ваш персонаж остаётся под вашим управлением.", hintStyle);
+        npcName.Value = GUILayout.TextField(npcName.Value, 40);
+        if (GUILayout.Button("Создать / найти NPC", panelButtonStyle)) CreateNpcFromPanel();
         var leader = FindLeader();
         if (GUILayout.Button("Лидер: " + (leader ? leader!.GetPlayerName() : "не выбран") + " · сменить", panelButtonStyle)) SelectNextLeader();
         GUI.enabled = !uiBusy;
@@ -376,7 +379,7 @@ public sealed partial class Plugin
         GUILayout.Label("Следование не требует ключа и не расходует квоту. F9 — немедленный стоп.", hintStyle);
         GUILayout.Space(12);
         if (GUILayout.Button("Дополнительно ›", panelButtonStyle)) uiAdditional = true;
-        GUILayout.Label("Обратитесь по имени персонажа: «Бъерн, подбери камни». Продолжения без имени AI понимает по контексту.", hintStyle);
+        GUILayout.Label("Обратитесь по имени NPC: «Гоша, подбери камни». «Следуй за мной» выполняется сразу, остальные формулировки разбирает AI.", hintStyle);
         }
         GUILayout.Space(10);
         if (GUILayout.Button("Назад в меню", panelButtonStyle))
