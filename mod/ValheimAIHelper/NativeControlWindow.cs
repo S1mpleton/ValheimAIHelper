@@ -225,7 +225,9 @@ public sealed partial class Plugin
             Button(main, "Следовать", 0, 192, 260, () => p.StartCoroutine(p.StartMode("follow")), true);
             Button(main, "Включить AI", 276, 192, 260, () => { p.uiObjective = CompanionObjective; p.StartCoroutine(p.StartMode("ai")); }, true);
             Button(main, "Стоп", 552, 192, 260, p.StopFromPanel);
-            Button(main, "Дополнительно  ›", 0, 258, 812, () => { additional = true; ShowPage(); });
+            Button(main, "Инвентарь NPC", 0, 258, 398, p.OpenCurrentNpcInventory);
+            Button(main, "Дополнительно  ›", 414, 258, 398, () => { additional = true; ShowPage(); });
+            Label(main, "Подойдите к NPC и нажмите E для обмена вещами.", 0, 306, 812, 24, 15);
             usageLabel = Label(main, "", 0, 336, 812, 42, 16);
             Button(advanced, "‹  Персонаж", 0, 0, 200, () => { additional = false; ShowPage(); });
             Label(advanced, "Дополнительно", 228, 7, 570, 28, 21);

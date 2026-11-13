@@ -75,6 +75,7 @@ public sealed partial class Plugin
 
     private void OpenPanelFromMenu()
     {
+        NpcInventoryWindow.Close();
         if (!panelFocusReady) { Logger.LogWarning("AI panel input focus is incompatible with this game version."); return; }
         if (Menu.instance) Menu.instance.Hide();
         SetPanel(true);
@@ -386,6 +387,7 @@ public sealed partial class Plugin
         GUILayout.EndHorizontal();
         GUILayout.Label("Следование не требует ключа и не расходует квоту. F9 — немедленный стоп.", hintStyle);
         GUILayout.Space(12);
+        if (GUILayout.Button("Инвентарь NPC", panelButtonStyle)) OpenCurrentNpcInventory();
         if (GUILayout.Button("Дополнительно ›", panelButtonStyle)) uiAdditional = true;
         GUILayout.Label("Обратитесь по имени NPC: «Гоша, подбери камни». «Следуй за мной» выполняется сразу, остальные формулировки разбирает AI.", hintStyle);
         }

@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.1")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.2")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -84,6 +84,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         if (showPanel && Input.GetKeyDown(KeyCode.Escape)) SetPanel(false);
         UpdatePanel();
         UpdateRuntime();
+        NpcInventoryWindow.Update();
         if (active && (!actor || !CompanionNpc.Is(actor) || actor == Player.m_localPlayer || !actor!.IsOwner() || actor.IsDead() || !Player.m_localPlayer))
             DisableControl("NPC недоступен или мир закрыт. AI отключён.");
     }
@@ -111,6 +112,7 @@ public sealed partial class Plugin : BaseUnityPlugin
 
     private bool EnableControl()
     {
+        NpcInventoryWindow.Close();
         if (!npcHooksReady)
         { status = "Ввод несовместим с этой версией игры. Подробности в BepInEx/LogOutput.log."; return false; }
         var player = Player.m_localPlayer;
@@ -313,6 +315,7 @@ public sealed partial class Plugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        NpcInventoryWindow.Close();
         DisableControl("Мод выгружен");
         SetPanel(false);
         uiKey = "";

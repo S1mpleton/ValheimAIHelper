@@ -68,15 +68,15 @@ internal sealed class EscMenuIntegration : IDisposable
                 }
             }
             button.gameObject.AddComponent<MenuEntryFeedback>().Initialize(button);
-            AccessTools.Field(typeof(Menu), "m_rebuildLayout")?.SetValue(menu, true);
+            UiReflection.Field(menu.GetType(), "m_rebuildLayout")?.SetValue(menu, true);
         }
         if (!buttonObject || button == null || !source.gameObject.activeSelf)
         {
             // Single-player menus hide the player-list item; insert after Continue instead.
-            var root = AccessTools.Field(typeof(Menu), "m_menuDialog")?.GetValue(menu) as Transform;
+            var root = NativeAccess.Object(NativeAccess.Read(menu, "m_menuDialog"))?.transform;
             var fallback = root != null && root ? root.Find("MenuEntries/Continue") : null;
             if (fallback != null && fallback) source = fallback.GetComponent(source.GetType()) ?? source;
-            var save = AccessTools.Field(typeof(Menu), "saveButton")?.GetValue(menu) as Component;
+            var save = NativeAccess.Read(menu, "saveButton") as Component;
             if (save != null && save && save.gameObject.activeSelf &&
                 save.GetType().GetProperty("interactable")?.GetValue(save, null) is true) source = save;
         }

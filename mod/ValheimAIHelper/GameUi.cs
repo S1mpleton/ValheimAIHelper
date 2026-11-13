@@ -8,19 +8,7 @@ namespace ValheimAIHelper;
 
 internal static class NativeAccess
 {
-    public static object? Read(object? target, params string[] names)
-    {
-        if (target == null) return null;
-        foreach (string name in names)
-        {
-            var property = UiReflection.Property(target.GetType(), name);
-            if (property != null && property.CanRead)
-            { var value = property.GetValue(target, null); if (value != null) return value; }
-            var field = UiReflection.Field(target.GetType(), name);
-            if (field != null) { var value = field.GetValue(target); if (value != null) return value; }
-        }
-        return null;
-    }
+    public static object? Read(object? target, params string[] names) => UiReflection.Read(target, names);
     public static object? Call(object target, string name, params object?[] args) => NativeMethods.Call(target, name, args);
     public static ItemDrop.ItemData? HeldItem(Player player) => Call(player, "GetRightItem") as ItemDrop.ItemData;
     public static GameObject? Object(object? value) => value is GameObject go ? go : (value as Component)?.gameObject;

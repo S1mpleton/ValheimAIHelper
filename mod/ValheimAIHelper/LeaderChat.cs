@@ -58,6 +58,11 @@ public sealed partial class Plugin
         if (!speaker) return;
         bool addressed = LeaderCommand.Addressed(text, plugin.CurrentNpc ? plugin.CurrentNpc!.GetPlayerName() : plugin.npcName.Value, out string command);
         if (!addressed && LeaderCommand.IsDirectFollow(text)) { addressed = true; command = text.Trim(); }
+        if (NpcInventoryWindow.IsOpenFor(plugin.CurrentNpc!))
+        {
+            if (addressed) plugin.ChatReply("Сейчас открыт мой инвентарь. Закройте его и повторите поручение.");
+            return;
+        }
         if (!addressed)
         {
             if (plugin.CanInferChat)

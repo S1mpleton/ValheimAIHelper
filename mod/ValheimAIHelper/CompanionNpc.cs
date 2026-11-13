@@ -10,7 +10,8 @@ using UnityEngine;
 namespace ValheimAIHelper;
 
 // A native, networked humanoid with its OWN Player data. Never call SetLocalPlayer,
-// swap the singleton, use the human's PlayerProfile or open their InventoryGui.
+// swap the singleton or use the human's PlayerProfile. InventoryGui is used only
+// when the human explicitly opens the companion's bag, never for AI actions.
 internal sealed class CompanionNpc : MonoBehaviour
 {
     internal const string Tag = "aihelper_npc_v1", Profile = "aihelper_profile_v1";
@@ -27,6 +28,7 @@ internal sealed class CompanionNpc : MonoBehaviour
         var npc = p.GetComponent<CompanionNpc>() ?? p.gameObject.AddComponent<CompanionNpc>();
         npc.Player = p;
         var input = p.GetComponent<PlayerController>(); if (input) input.enabled = false;
+        NpcInventoryWindow.Attach(p);
         return npc;
     }
     internal static void CheckCompatibility()
@@ -59,7 +61,12 @@ internal sealed class CompanionNpc : MonoBehaviour
             // Character/Humanoid.CustomFixedUpdate. Exclude local-camera, auto-
             // pickup, keyboard, respawn, world-discovery and InventoryGui updates.
             updates ??= Updates.Select(name => NativeMethods.BindFloat(p, name)).ToArray();
-            foreach (var update in updates) update(dt);
+            bool exchangingItems = NpcInventoryWindow.IsOpenFor(p);
+            for (int i = 0; i < updates.Length; ++i)
+            {
+                if (exchangingItems && (Updates[i] == "UpdateActionQueue" || Updates[i] == "PlayerAttackInput")) continue;
+                updates[i](dt);
+            }
             var station = p.GetCurrentCraftingStation();
             if (station && !station.InUseDistance(p)) p.SetCraftingStation(null);
             if (Time.realtimeSinceStartup >= nextSave) { Save(); nextSave = Time.realtimeSinceStartup + 1; }
@@ -70,7 +77,7 @@ internal sealed class CompanionNpc : MonoBehaviour
     {
         var p = Player;
         if (!p || !NpcAuthorityPolicy.MayControl(Is(p), ZNet.instance && ZNet.instance.IsServer(), p!.IsOwner(), p == Player.m_localPlayer, !p.IsDead())) return;
-        if (failed) input = default;
+        if (failed || NpcInventoryWindow.IsOpenFor(p)) input = default;
         var aim = input.HasAim ? new Vector3(input.AimX, input.AimY, input.AimZ) : new Vector3(input.X, 0, input.Z);
         if (aim.sqrMagnitude > .001f) p.SetLookDir(aim.normalized);
         AccessTools.Field(typeof(Player), "m_autoRun")?.SetValue(p, false);
@@ -116,6 +123,7 @@ internal sealed class CompanionNpc : MonoBehaviour
     {
         if (!Player.IsOwner() || dying) return;
         dying = true;
+        if (NpcInventoryWindow.IsOpenFor(Player)) NpcInventoryWindow.Close();
         using var scope = new NpcScope();
         Stop();
         Player.GetComponent<ZNetView>().GetZDO().Set("dead", true);
@@ -156,6 +164,8 @@ public sealed partial class Plugin
             npcHooksReady = true;
         }
         catch (Exception ex) { AddLog("npc", "NPC несовместим с игрой: " + ex); }
+        try { NpcInventoryWindow.Initialize(harmony!); }
+        catch (Exception ex) { AddLog("npc-inventory", "Обмен вещами несовместим с игрой: " + ex); }
     }
     private Player? CurrentNpc => Player.GetAllPlayers().FirstOrDefault(p => p && CompanionNpc.Is(p) && !p.IsDead());
     private void LoadNpcRecord()

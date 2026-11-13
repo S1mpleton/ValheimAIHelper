@@ -17,6 +17,29 @@ public static class UiReflection
         type = resolve(name); if (type != null) types.TryAdd(name, type);
         return type;
     }
+    // Optional native members vary between Valheim versions. A missing
+    // property/field is a normal fallback, not a Harmony warning. Cache misses
+    // too: observation reads these members every update.
+    public static object? Read(object? target, params string[] names)
+    {
+        if (target == null) return null;
+        foreach (string name in names)
+        {
+            var property = Property(target.GetType(), name);
+            if (property != null && property.CanRead)
+            {
+                var value = property.GetValue(target, null);
+                if (value != null) return value;
+            }
+            var field = Field(target.GetType(), name);
+            if (field != null)
+            {
+                var value = field.GetValue(target);
+                if (value != null) return value;
+            }
+        }
+        return null;
+    }
     public static bool Write(object target, string name, object? value)
     {
         var property = Property(target.GetType(), name);

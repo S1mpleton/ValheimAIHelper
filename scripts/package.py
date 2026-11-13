@@ -42,6 +42,8 @@ def main():
                          "Ollama: start it on this PC and install a local text model first. Default http://127.0.0.1:11434.\r\n"
                          "No API key needed for Ollama. Thinking is disabled (think=false). Models are not bundled.\r\n"
                          "Leader chat: address the NPC by name, e.g. Gosha, pick up stones.\r\n"
+                         "NPC inventory: approach and press E, or Character -> NPC inventory. No AI needed.\r\n"
+                         "Opening the bag stops the NPC; enable Follow / AI again after closing.\r\n"
                          "Only the exact Russian follow command is immediate; paraphrases are interpreted by AI.\r\n"
                          "F9 stops the NPC. No second client/account required. See docs/npc.md.\r\n")
     checksum = hashlib.sha256(output.read_bytes()).hexdigest()
