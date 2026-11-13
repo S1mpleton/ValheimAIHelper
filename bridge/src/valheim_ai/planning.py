@@ -163,6 +163,13 @@ class Planner:
                 if terminal and snapshot.action_status == "success" and step.action == Action.SPEAK:
                     state.chat_history.append({"id":0,"speaker":"assistant","text":step.text,"explicit_address":False})
                 self.steps.popleft()
+                if terminal and snapshot.action_status == "success" and step.action == Action.SPEAK and not self.steps and not state.pending_chat:
+                    # The game confirmed that this answer was spoken. A small
+                    # model need not explicitly mark the question complete or
+                    # keep answering the same question on every decision tick.
+                    state.event("mission", "Ответ передан; ожидаю новое поручение")
+                    state.command = state.command.model_copy(update={"objective": IDLE_OBJECTIVE})
+                    self.successful_steps = 0
                 if (terminal and snapshot.action_status == "blocked") or (not terminal and step.action not in (Action.WAIT, Action.FOLLOW)):
                     state.feedback("Не удалось выполнить " + step.action.value + ": " + outcome, key="blocked-" + step.action.value + outcome)
                 elif terminal and snapshot.action_status == "success" and step.action in (Action.PICKUP, Action.DROP, Action.GIVE, Action.TAKE, Action.DEPOSIT):
@@ -183,7 +190,8 @@ class Planner:
                 if (terminal and snapshot.action_status == "blocked") or not terminal:
                     self.steps.clear()
                 self._next_id()
-        can_replan = not self.steps or (len(self.steps) == 1 and self.steps[0].action == Action.WAIT) or bool(state.pending_chat)
+        can_replan = bool(state.pending_chat) or (state.command.objective != IDLE_OBJECTIVE and
+                     (not self.steps or (len(self.steps) == 1 and self.steps[0].action == Action.WAIT)))
         if (can_replan and self.task is None and not state.chat_busy and state.check_task is None and now >= max(state.next_ai_request, state.retry_after)
                 and state.ready and not snapshot.simulation_paused and (snapshot.leader_id or not companion_duty(state.command.objective) or state.pending_chat)):
             state.next_ai_request = now + state.request_interval_seconds

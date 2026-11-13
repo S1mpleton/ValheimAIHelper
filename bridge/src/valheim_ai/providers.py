@@ -171,6 +171,8 @@ class ProviderInvalidAction(ProviderError):
 
 
 TARGET_REASONS = {
+    "Model repeated request instead of answering": "модель повторила вопрос или поручение вместо ответа; попробуйте другую локальную модель",
+    "Model returned repetitive speech": "модель зациклила текст ответа; попробуйте другую локальную модель",
     "Only movement can specify a destination": "лишняя destination: координаты разрешены только move/jump/look/build",
     "This mod does not support the requested action": "действие не поддерживается установленным модом",
     "This action has no target": "у этого действия target_id должен быть пустым",
@@ -297,13 +299,18 @@ async def decide(
     *, planning: bool = False, history: tuple[str, ...] = (), chat: tuple[dict, ...] = (),
     ollama_url: str = "http://127.0.0.1:11434", ollama_session=None, statistics=None, trace=None,
 ) -> Decision | Plan:
-    data = snapshot.model_dump(mode="json", exclude_none=provider == "ollama", exclude_defaults=provider == "ollama")
+    local_snapshot, local_ids = snapshot, {}
+    if provider == "ollama":
+        from .local_ids import readable_view
+        local_snapshot, local_ids = readable_view(snapshot)
+    request_snapshot = local_snapshot if provider == "ollama" else snapshot
+    data = request_snapshot.model_dump(mode="json", exclude_none=provider == "ollama", exclude_defaults=provider == "ollama")
     if provider == "ollama":
         # Bound local context without removing any inventory IDs. The full
         # authoritative snapshot is still used for validation below.
         # Keep every reported ground item and player: silently truncating drops
         # made local agents unable to fulfil a request even when the mod saw it.
-        data["entities"] = sorted(data.get("entities", []), key=lambda e: (e.get("id") != snapshot.leader_id, e.get("kind") != "item", e.get("kind") != "enemy", e.get("distance", 0)))
+        data["entities"] = sorted(data.get("entities", []), key=lambda e: (e.get("id") != local_snapshot.leader_id, e.get("kind") != "item", e.get("kind") != "enemy", e.get("distance", 0)))
         for field, limit in (("recipes", 12), ("build_options", 16)):
             if field in data: data[field] = data[field][:limit]
         data["actor"].update(max_stamina=snapshot.actor.max_stamina, max_carry_weight=snapshot.actor.max_carry_weight)
@@ -354,7 +361,7 @@ async def decide(
             from .local_prompt import instructions
             # Ollama accepts optional JSON properties. Requiring every unused
             # argument inflated output and made small models invent coordinates.
-            schema = action_schema(snapshot, planning, chat, history)
+            schema = action_schema(local_snapshot, planning, chat, history)
             messages[0]["content"] = instructions(schema, planning) + chat_prompt
             # Small local models benefit from the operator goal after the data,
             # instead of copying the last observed status as their new task.
@@ -401,6 +408,14 @@ async def decide(
         if trace is not None and isinstance(text, str): trace.set("response", text)
         if planning:
             result = Plan.model_validate_json(text)
+            if provider == "ollama":
+                from .local_ids import native_decision
+                result = result.model_copy(update={"steps": [native_decision(s, local_ids) for s in result.steps]})
+            from .reply_policy import validate_reply
+            if result.chat_intent and result.chat_intent.mode == "reply" and result.chat_intent.reply:
+                validate_reply(result.chat_intent.reply, objective, chat, snapshot.actor.name)
+            for step in result.steps:
+                if step.action.value == "speak": validate_reply(step.text, objective, chat, snapshot.actor.name)
             if result.combat_policy == "avoid" and any(s.action.value in ("attack", "hunt", "secondary_attack") for s in result.steps):
                 raise action_error(ValueError("Avoid policy cannot attack"))
             steps = []
@@ -408,7 +423,11 @@ async def decide(
                 try: steps.append(inventory_status(validate_decision(step, snapshot), snapshot))
                 except ValueError as exc: raise action_error(exc, step, index) from None
             return result.model_copy(update={"steps": steps})
-        return inventory_status(validate_decision(Decision.model_validate_json(text), snapshot), snapshot)
+        result = Decision.model_validate_json(text)
+        if provider == "ollama":
+            from .local_ids import native_decision
+            result = native_decision(result, local_ids)
+        return inventory_status(validate_decision(result, snapshot), snapshot)
     except ProviderModelNotFound as exc:
         # Never display the upstream body: it can include request data or credentials.
         message = str(exc) if provider == "ollama" else (

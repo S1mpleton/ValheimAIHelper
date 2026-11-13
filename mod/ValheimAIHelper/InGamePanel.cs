@@ -239,7 +239,7 @@ public sealed partial class Plugin
             if (!active || !bridgeSessionReady || operation != uiOperation)
             { if (operation == uiOperation) uiError = "Нет данных персонажа от службы AI. " + status; yield break; }
             bool started = false;
-            yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = mode, objective = uiObjective }, value =>
+            yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = mode, objective = mode == "follow" ? CompanionObjective : uiObjective }, value =>
             {
                 if (operation != uiOperation) return;
                 started = value.ok;

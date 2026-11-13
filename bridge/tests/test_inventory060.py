@@ -152,8 +152,9 @@ async def test_all_reported_ground_drops_reach_local_model_without_second_trunca
         content = json.loads(req.content)["messages"][1]["content"]
         data = json.loads(content.split("\n", 1)[1])
         assert len([e for e in data["entities"] if e["kind"] == "item"]) == 61
-        assert any(e["id"] == "drop:59" and e["count"] == 60 for e in data["entities"])
-        return reply(plan("pickup", "drop:59"))
+        target = next(e for e in data["entities"] if e.get("count") == 60)
+        assert target["id"].startswith("@ground/Камень/")
+        return reply(plan("pickup", target["id"]))
     async with app_client(handler) as (app, c):
         await start(c, snapshot)
         assert (await cycle(app, c, snapshot)).json()["action"] == "pickup"

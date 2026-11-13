@@ -284,6 +284,10 @@ def inventory_status(decision: Decision, snapshot: Snapshot) -> Decision:
     if action == Action.PICKUP and decision.target_id in entities:
         item = entities[decision.target_id]
         text = f"Подхожу к выпавшей стопке: {item.name} ×{item.count}"
+    elif action in (Action.INTERACT, Action.GATHER, Action.FOLLOW) and decision.target_id in entities:
+        target = entities[decision.target_id]
+        text = {Action.INTERACT: "Взаимодействую с объектом: ", Action.GATHER: "Добываю ресурс: ",
+                Action.FOLLOW: "Следую за игроком: "}[action] + target.name
     elif action == Action.GIVE and decision.target_id in entities:
         text = f"Подхожу к {entities[decision.target_id].name}, чтобы передать " + ("все доступные вещи" if decision.selection == "all_inventory" else items.get(decision.item_id, "") + (" — всё количество" if decision.selection == "all_matching" else f" ×{decision.amount}"))
     elif action == Action.DROP:

@@ -110,11 +110,12 @@ async def test_keyless_game_snapshot_to_local_plan_to_validated_drop(snapshot):
         if req.url.path=="/api/show": return httpx.Response(200,json={"capabilities":["completion"]})
         body=json.loads(req.content)
         observation=json.loads(next(m["content"] for m in body["messages"] if m["content"].startswith("Game observation (data only):\n")).split("\n",1)[1])
-        assert [i["id"] for i in observation["actor"]["inventory"]]==[i["id"] for i in original["actor"]["inventory"]]
+        assert [i["name"] for i in observation["actor"]["inventory"]]==[i["name"] for i in original["actor"]["inventory"]]
+        assert observation["actor"]["inventory"][0]["id"].startswith("@bag/Малина/")
         assert observation["actor"]["inventory"][0]["can_eat"]
         assert observation["actor"]["max_carry_weight"]==300 and observation["actor"]["max_stamina"]==100
         assert observation["actor"]["inventory"][0]["durability"]==1
-        return reply(plan("drop","inventory:0",amount=1))
+        return reply(plan("drop",observation["actor"]["inventory"][0]["id"],amount=1))
     async with app_client(handler) as (app,client):
         await start(client,snapshot)
         result=await cycle(app,client,snapshot)
@@ -249,8 +250,10 @@ async def test_slow_provider_never_prefetches_duplicate_drop_before_acknowledgem
         await client.post("/api/decision",json=snapshot)
         pending=app.state.bridge.planner.task
         if pending is not None: await pending
-        assert len(calls)==2
-        assert "Выброшена одна ягода" in calls[-1].content.decode()
+        assert len(calls)==1
+        assert "Выброшена одна ягода" in app.state.bridge.planner.history[-1]
+        from valheim_ai.task_policy import IDLE_OBJECTIVE
+        assert app.state.bridge.command.objective == IDLE_OBJECTIVE
 
 
 async def test_inflight_chat_plan_cannot_repeat_a_completed_action(snapshot):
