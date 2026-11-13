@@ -40,7 +40,7 @@ public static class DecisionPolicy
             case "attack": return allowCombat && entity?.kind == "enemy" && InRange(s.actor.position, entity);
             case "secondary_attack": return allowCombat && entity?.kind == "enemy" && InRange(s.actor.position, entity);
             case "hunt": return allowCombat && entity?.kind == "animal" && InRange(s.actor.position, entity);
-            case "gather": return entity?.kind == "resource" && InRange(s.actor.position, entity);
+            case "gather": return entity?.kind == "resource" && InRange(s.actor.position, entity) && ResourcePolicy.CanGather(entity, s.actor.inventory);
             case "defend": case "flee": case "dodge": return entity?.kind == "enemy" && InRange(s.actor.position, entity);
             case "pickup": return entity?.kind == "item" && InRange(s.actor.position, entity, 128);
             case "give": return entity?.kind == "player" && InRange(s.actor.position, entity, 60) && TransferPolicy.Available(s.actor.inventory, d.item_id, d.selection, d.amount);

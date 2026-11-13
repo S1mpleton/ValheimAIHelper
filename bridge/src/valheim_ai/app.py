@@ -643,7 +643,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if mode == "follow" and snapshot.leader_id:
             result = Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3, say="Следую за лидером")
         elif mode == "follow":
-            result = wait("Лидер не виден. Подойдите к нему или задайте Player.LeaderName в конфигурации мода")
+            result = wait("Лидер не виден. Выберите игрока во вкладке «Персонаж»; NPC ожидает на месте")
         elif mode == "ai":
             if time.monotonic() < state.retry_after:
                 result = wait("API перегружен (503); пауза 15 секунд перед новым запросом")
@@ -691,7 +691,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 state.command = Command(mode="stop", objective=state.command.objective)
                 state.revision += 1
                 result = wait("AI остановлен. " + result.say)
-        result = validate_decision(result, snapshot)
+        result = validate_decision(result, snapshot).model_copy(update={"duration": 3})
         state.event(source, result.say or result.action.value)
         return DecisionReply(**result.model_dump(), sequence=snapshot.sequence,
                              source=source, command_revision=state.revision, mode=state.command.mode)

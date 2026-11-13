@@ -10,11 +10,12 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.0")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.1")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
-    private ConfigEntry<string> bridgeUrl = null!, bridgeToken = null!, leaderName = null!;
+    private ConfigEntry<string> bridgeUrl = null!, bridgeToken = null!, leaderName = null!, leaderMode = null!;
+    private ConfigEntry<long> selectedLeader = null!;
     private ConfigEntry<bool> allowCombat = null!, autoSurvival = null!, autoBridge = null!, allowChat = null!, controlByAllPlayers = null!;
     private ConfigEntry<float> interval = null!;
     private readonly ActionExecutor executor = new();
@@ -27,6 +28,7 @@ public sealed partial class Plugin : BaseUnityPlugin
     private CursorLockMode oldCursorLock;
     private bool oldCursorVisible;
     private long? leaderId;
+    private string resolvedLeaderName = "";
     private Coroutine? loop;
     private UnityWebRequest? pending;
     private string session = "", status = "F8 — управление NPC. F9 — остановить NPC.";
@@ -41,6 +43,8 @@ public sealed partial class Plugin : BaseUnityPlugin
         bridgeUrl = Config.Bind("Bridge", "Url", "http://127.0.0.1:8765", "Local bridge URL. Loopback HTTP only.");
         bridgeToken = Config.Bind("Bridge", "Token", "", "Pairing code from .local/bridge-token, NOT an AI API key.");
         leaderName = Config.Bind("Player", "LeaderName", "", "Exact leader character name. Empty: the local human player leads the NPC.");
+        leaderMode = Config.Bind("Companion", "LeaderMode", "local", "local = the human on this client; selected = explicit character selected in the menu. Legacy second-client LeaderName does not select a leader in local mode.");
+        selectedLeader = Config.Bind("Companion", "SelectedLeaderId", 0L, "Persistent player identity of the selected human leader. Never an NPC or a network peer ID.");
         allowCombat = Config.Bind("Player", "AllowCombat", true, "Allow combat and immediate defence against hostile monsters. Visible in the game panel.");
         autoSurvival = Config.Bind("Player", "AutoSurvival", true, "Use available food through native inventory actions.");
         allowChat = Config.Bind("Player", "LeaderChat", true, "Accept ordinary chat from the selected leader; character name explicitly addresses the helper. Chat context is sent to the configured AI.");
@@ -58,7 +62,7 @@ public sealed partial class Plugin : BaseUnityPlugin
             harmony.PatchAll(typeof(ControlInputPatch));
         }
         catch (Exception ex) { Logger.LogError("Native input hook is incompatible with this game: " + ex); AddLog("input", ex.ToString()); }
-        try { harmony.PatchAll(typeof(EscMenuPatch)); }
+        try { harmony.PatchAll(typeof(EscMenuPatch)); harmony.PatchAll(typeof(EscNavigationPatch)); }
         catch (Exception ex) { Logger.LogWarning("Esc menu entry: " + ex.GetType().Name + ". Use F8."); }
         try { harmony.PatchAll(typeof(LeaderChatPatch)); }
         catch (Exception ex) { AddLog("chat", "Приём чата несовместим с игрой: " + ex.GetType().Name); }
@@ -93,7 +97,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         {
             using var scope = new NpcScope();
             executor.Tick(actor, FindLeader(), allowCombat.Value, autoSurvival.Value);
-            if (executor.ActionStatus == "blocked") actor.GetComponent<CompanionNpc>().Stop();
+            if (executor.CancelAttacks) actor.GetComponent<CompanionNpc>().Stop();
             else actor.GetComponent<CompanionNpc>().Apply(executor.ConsumeInput());
             ReportLocalBlock();
         }
@@ -177,16 +181,21 @@ public sealed partial class Plugin : BaseUnityPlugin
 
     private Player? FindLeader()
     {
-        var local = actor ? actor : Player.m_localPlayer;
-        if (local == null || !local) return null;
-        var players = Player.GetAllPlayers().Where(p => p && !CompanionNpc.Is(p) && !p.IsDead());
-        if (leaderId.HasValue) return players.FirstOrDefault(p => p.GetPlayerID() == leaderId.Value);
-        var chosen = string.IsNullOrWhiteSpace(leaderName.Value) && Player.m_localPlayer ? Player.m_localPlayer : !string.IsNullOrWhiteSpace(leaderName.Value)
-            ? players.FirstOrDefault(p => string.Equals(p.GetPlayerName(), leaderName.Value, StringComparison.OrdinalIgnoreCase))
-            : players.Where(p => Vector3.Distance(p.transform.position, local.transform.position) <= 60)
-                .OrderBy(p => Vector3.SqrMagnitude(p.transform.position - local.transform.position)).FirstOrDefault();
-        if (chosen) leaderId = chosen.GetPlayerID();
+        var humans = Player.GetAllPlayers().Where(p => p && !CompanionNpc.Is(p) && !p.IsDead()).ToArray();
+        var local = Player.m_localPlayer;
+        var id = LeaderSelection.Resolve(leaderMode.Value != "selected", local ? local.GetPlayerID() : (long?)null,
+            selectedLeader.Value != 0 ? selectedLeader.Value : (long?)null, leaderName.Value,
+            humans.Select(p => new LeaderIdentity { Id = p.GetPlayerID(), Name = p.GetPlayerName() }));
+        leaderId = id;
+        var chosen = humans.FirstOrDefault(p => p.GetPlayerID() == id);
+        resolvedLeaderName = chosen ? chosen!.GetPlayerName() : "";
         return chosen;
+    }
+    private void ChooseLeader(Player player)
+    {
+        leaderName.Value = player.GetPlayerName(); leaderId = player.GetPlayerID();
+        leaderMode.Value = player == Player.m_localPlayer ? "local" : "selected";
+        selectedLeader.Value = player == Player.m_localPlayer ? 0 : player.GetPlayerID();
     }
 
     private IEnumerator DecisionLoop()
@@ -200,8 +209,11 @@ public sealed partial class Plugin : BaseUnityPlugin
             {
                 executor.RefreshOutcomes(actor);
                 observation = Observation.Capture(actor, FindLeader(), session, ++sequence, previousResult);
-                observation.Data.previous_result = ObservationValues.Text(executor.Result, 240);
+                observation.Data.previous_result = ObservationValues.Text(executor.Outcome, 240);
+                observation.Data.motor_state = executor.MotorState;
+                observation.Data.leader_name = ObservationValues.Text(resolvedLeaderName.Length > 0 ? resolvedLeaderName : leaderName.Value, 120);
                 observation.Data.background_planning = true;
+                observation.Data.simulation_paused = Time.timeScale < .01f;
                 observation.Data.listen_chat = allowChat.Value;
                 observation.Data.plan_id = executor.PlanId;
                 observation.Data.action_status = executor.ActionStatus;

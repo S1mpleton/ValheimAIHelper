@@ -11,6 +11,14 @@ namespace ValheimAIHelper;
 internal static class NativeMethods
 {
     private static readonly ConcurrentDictionary<string, MethodInfo> methods = new();
+    public static Action<float> BindFloat(object target, string name)
+    {
+        MethodInfo? method = null;
+        for (var t = target.GetType(); t != null && method == null; t = t.BaseType)
+            method = t.GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly, null, new[] { typeof(float) }, null);
+        if (method == null) throw new MissingMethodException(target.GetType().FullName, name + "(float)");
+        return (Action<float>)Delegate.CreateDelegate(typeof(Action<float>), target, method);
+    }
     public static object? Call(object target, string name, params object?[] args)
     {
         var type = target.GetType();

@@ -39,7 +39,7 @@ public sealed partial class Plugin
     private void FollowChatSpeaker(Player speaker)
     {
         if (!controlByAllPlayers.Value && leaderId.HasValue && leaderId != speaker.GetPlayerID()) return;
-        leaderName.Value = speaker.GetPlayerName(); leaderId = speaker.GetPlayerID();
+        ChooseLeader(speaker);
         AddLog("leader", "Следование за отправителем команды: " + speaker.GetPlayerName());
     }
     private void ToggleChatControlScope()
@@ -141,7 +141,7 @@ public sealed partial class Plugin
         if (players.Count == 0) { uiError = "Игроков в мире нет."; return; }
         int index = players.FindIndex(p => leaderId == p.GetPlayerID());
         var selected = players[(index + 1) % players.Count];
-        leaderName.Value = selected.GetPlayerName(); leaderId = selected.GetPlayerID();
+        ChooseLeader(selected);
         if (active) StopFromPanel();
         // Stop releases control, but the operator's explicit choice survives it.
         leaderId = selected.GetPlayerID();

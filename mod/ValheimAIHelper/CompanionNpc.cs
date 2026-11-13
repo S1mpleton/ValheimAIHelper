@@ -18,6 +18,7 @@ internal sealed class CompanionNpc : MonoBehaviour
     private bool loaded, failed, saving, dying;
     internal bool Ready => loaded && !failed;
     private float nextSave;
+    private Action<float>[]? updates;
     private static readonly string[] Updates = { "UpdateAwake", "UpdateTargeted", "UpdateActionQueue", "PlayerAttackInput", "UpdateCrouch", "UpdateDodge", "UpdateCover", "UpdateGuardianPower", "UpdateStats", "UpdateStealth" };
     internal static bool Is(Player? p) => p && (p!.GetComponent<CompanionNpc>() ||
         (p.GetComponent<ZNetView>() is ZNetView v && v.IsValid() && v.GetZDO().GetBool(Tag, false)));
@@ -57,8 +58,8 @@ internal sealed class CompanionNpc : MonoBehaviour
             // Physics, animation, weapons and status effects still run through
             // Character/Humanoid.CustomFixedUpdate. Exclude local-camera, auto-
             // pickup, keyboard, respawn, world-discovery and InventoryGui updates.
-            foreach (string method in Updates)
-                NativeMethods.Call(p, method, dt);
+            updates ??= Updates.Select(name => NativeMethods.BindFloat(p, name)).ToArray();
+            foreach (var update in updates) update(dt);
             var station = p.GetCurrentCraftingStation();
             if (station && !station.InUseDistance(p)) p.SetCraftingStation(null);
             if (Time.realtimeSinceStartup >= nextSave) { Save(); nextSave = Time.realtimeSinceStartup + 1; }

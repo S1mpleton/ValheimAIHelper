@@ -13,10 +13,10 @@ internal static class NativeAccess
         if (target == null) return null;
         foreach (string name in names)
         {
-            var property = AccessTools.Property(target.GetType(), name);
+            var property = UiReflection.Property(target.GetType(), name);
             if (property != null && property.CanRead)
             { var value = property.GetValue(target, null); if (value != null) return value; }
-            var field = AccessTools.Field(target.GetType(), name);
+            var field = UiReflection.Field(target.GetType(), name);
             if (field != null) { var value = field.GetValue(target); if (value != null) return value; }
         }
         return null;
@@ -28,7 +28,7 @@ internal static class NativeAccess
 
 internal static class GameUi
 {
-    public static Type? FindType(string name) => AccessTools.TypeByName(name);
+    public static Type? FindType(string name) => UiReflection.Resolve(name, AccessTools.TypeByName);
     public static bool IsText(Component component) => FindType("TMPro.TMP_Text")?.IsInstanceOfType(component) == true || FindType("UnityEngine.UI.Text")?.IsInstanceOfType(component) == true;
     public static IEnumerable<Component> Loaded(string type)
     {
@@ -76,8 +76,8 @@ internal static class GameUi
         }
         return source.transform;
     }
-    public static Component? Font(Menu menu) => Components(menu, "TMPro.TMP_Text").Concat(Loaded("TMPro.TMP_Text"))
-        .FirstOrDefault(c => NativeAccess.Read(c, "font") != null);
+    public static Component? Font(Menu menu) => Components(menu, "TMPro.TMP_Text").FirstOrDefault(c => NativeAccess.Read(c, "font") != null)
+        ?? Loaded("TMPro.TMP_Text").FirstOrDefault(c => NativeAccess.Read(c, "font") != null);
     public static Component? Canvas(Menu menu)
     {
         var type = FindType("UnityEngine.Canvas");

@@ -8,8 +8,7 @@ from .protocol import Action, Decision, Plan, validate_decision, wait
 from .providers import (ProviderError, ProviderUnavailable,
                         ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError, ProviderInvalidAction)
 
-IDLE_OBJECTIVE = "Поручение выполнено. Вернись к лидеру, помогай ему выживать, поддерживай еду, отдых и снаряжение. Ожидай новых поручений; не повторяй завершённый сброс, крафт или ответ."
-
+from .task_policy import IDLE_OBJECTIVE, COMPANION_OBJECTIVE, companion_duty, planning_view
 
 class Planner:
     def __init__(self, state):
@@ -24,6 +23,8 @@ class Planner:
         self.execution_epoch = 0
         self.announced = False
         self.invalid_plans = 0
+        self.last_tick = 0.0
+        self.was_paused = False
 
     def interrupt_planning(self):
         if self.task is not None: self.task.cancel()
@@ -41,6 +42,8 @@ class Planner:
         self.successful_steps = 0
         self.announced = False
         self.invalid_plans = 0
+        self.last_tick = 0.0
+        self.was_paused = False
 
     async def close(self):
         task = self.task
@@ -55,7 +58,7 @@ class Planner:
         execution_epoch = self.execution_epoch
         try:
             result = await asyncio.wait_for(state.decide(
-                state.command.objective, snapshot, planning=True, history=tuple(self.history), chat=chat,
+                state.command.objective, planning_view(state.command.objective, snapshot, pending_ids), planning=True, history=tuple(self.history), chat=chat,
             ), state.decision_timeout)
             if revision != state.revision or session != state.session_id or state.command.mode != "ai":
                 return
@@ -89,7 +92,7 @@ class Planner:
                 self.steps.clear(); self.plan_id = ""
                 return
             self.steps = deque(result.steps)
-            if state.command.objective == IDLE_OBJECTIVE and snapshot.leader_id and "follow" in snapshot.supported_actions and all(s.action == Action.WAIT for s in self.steps):
+            if companion_duty(state.command.objective) and snapshot.leader_id and "follow" in snapshot.supported_actions and all(s.action == Action.WAIT for s in self.steps):
                 self.steps = deque([Decision(action=Action.FOLLOW,target_id=snapshot.leader_id,duration=3,say="Возвращаюсь к лидеру")])
             if result.objective_complete and self.successful_steps > 0 and not (intent and intent.addressed and intent.mode == "task"):
                 state.event("mission", "Поручение выполнено: " + state.command.objective)
@@ -143,6 +146,8 @@ class Planner:
     def decision(self, snapshot):
         state = self.state
         now = time.monotonic()
+        if self.last_tick and (snapshot.simulation_paused or self.was_paused): self.step_started += max(0, now - self.last_tick)
+        self.last_tick = now; self.was_paused = snapshot.simulation_paused
         if state.command.mode != "ai":
             return wait(), "local", ""
         if self.steps:
@@ -150,7 +155,7 @@ class Planner:
             terminal = snapshot.plan_id == self.plan_id and snapshot.action_status in ("success", "blocked")
             budget = float("inf") if step.action == Action.FOLLOW else step.duration if step.action == Action.WAIT else 90 if step.action in (Action.PICKUP, Action.GIVE) else min(60, step.amount * 5 + 5) if step.action == Action.CRAFT else 25
             if terminal or now - self.step_started >= budget:
-                outcome = snapshot.previous_result if terminal else "Шаг исчерпал время"
+                outcome = snapshot.previous_result if terminal else "Ожидание завершено" if step.action == Action.WAIT else "Шаг исчерпал время"
                 self.history.append((step.action.value + ": " + outcome)[:240])
                 state.event("motor", self.history[-1])
                 if terminal and snapshot.action_status == "success" and step.action not in (Action.WAIT, Action.FOLLOW): self.successful_steps += 1
@@ -178,9 +183,9 @@ class Planner:
                 if (terminal and snapshot.action_status == "blocked") or not terminal:
                     self.steps.clear()
                 self._next_id()
-        can_replan = not self.steps or (len(self.steps) == 1 and self.steps[0].action in (Action.WAIT, Action.FOLLOW)) or bool(state.pending_chat)
+        can_replan = not self.steps or (len(self.steps) == 1 and self.steps[0].action == Action.WAIT) or bool(state.pending_chat)
         if (can_replan and self.task is None and not state.chat_busy and state.check_task is None and now >= max(state.next_ai_request, state.retry_after)
-                and state.ready):
+                and state.ready and not snapshot.simulation_paused and (snapshot.leader_id or not companion_duty(state.command.objective) or state.pending_chat)):
             state.next_ai_request = now + state.request_interval_seconds
             self.task = asyncio.create_task(self._plan(snapshot, state.revision, state.session_id))
         if self.steps:
@@ -193,7 +198,8 @@ class Planner:
                 self.steps.clear()
                 self._next_id()
         # Keep a useful, explicitly requested follow going while a model thinks.
-        if snapshot.leader_id and "follow" in snapshot.supported_actions and state.command.objective in ("Следуй за лидером и помогай ему выжить.", IDLE_OBJECTIVE):
+        if snapshot.leader_id and "follow" in snapshot.supported_actions and companion_duty(state.command.objective):
             return Decision(action=Action.FOLLOW, target_id=snapshot.leader_id, duration=3,
                             say="Рядом с лидером; ожидаю план AI"), "motor", "follow-pending"
-        return wait("Ожидаю план AI" if self.task else "Ожидаю следующий цикл AI").model_copy(update={"duration": 3}), "motor", ""
+        message = "Лидер не виден. Выберите игрока во вкладке «Персонаж»; NPC ожидает на месте" if companion_duty(state.command.objective) and not snapshot.leader_id else "Ожидаю план AI" if self.task else "Ожидаю следующий цикл AI"
+        return wait(message).model_copy(update={"duration": 3}), "motor", ""

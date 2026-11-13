@@ -2,6 +2,7 @@
 from copy import deepcopy
 
 from .protocol import Decision, Plan
+from .affordances import can_gather
 
 
 def action_schema(snapshot, planning, chat=(), history=()):
@@ -20,7 +21,7 @@ def action_schema(snapshot, planning, chat=(), history=()):
         "drop": bags, "unequip": [i.id for i in inventory if i.equipable],
         "equip": [i.id for i in inventory if i.equipable],
         "eat": [i.id for i in inventory if i.food and i.can_eat], "use": [i.id for i in inventory if i.usable],
-        "gather": kinds("resource"), "hunt": kinds("animal"), "interact": kinds("interactable"),
+        "gather": [e.id for e in entities if e.kind == "resource" and e.distance <= 20 and can_gather(e, inventory)], "hunt": kinds("animal"), "interact": kinds("interactable"),
         "use_on": kinds("interactable") if bags else [],
         "open": categories("container"), "stack": categories("container"),
         "take": [snapshot.container_id] if snapshot.container_id and snapshot.container_inventory else [],
@@ -66,7 +67,7 @@ def action_schema(snapshot, planning, chat=(), history=()):
     if planning:
         schema["$defs"]["Decision"] = {"anyOf": variants}
         schema["required"] = ["steps", "chat_intent", "combat_policy", "objective_complete"]
-        schema["properties"]["steps"]["maxItems"] = 3
+        schema["properties"]["steps"]["maxItems"] = 1
         pending = [m["id"] for m in chat if m.get("pending")]
         if pending:
             schema["$defs"]["ChatIntent"]["properties"]["message_id"]["enum"] = pending
@@ -75,5 +76,5 @@ def action_schema(snapshot, planning, chat=(), history=()):
         if not history: schema["properties"]["objective_complete"] = {"type": "boolean", "const": False}
     else:
         schema = {"anyOf": variants, "$defs": schema.get("$defs", {})}
-    schema.get("$defs", {}).get("Action", {})["enum"] = list(dict.fromkeys(["wait", *snapshot.supported_actions]))
+    schema.get("$defs", {}).get("Action", {})["enum"] = list(dict.fromkeys(v["properties"]["action"]["const"] for v in variants))
     return schema

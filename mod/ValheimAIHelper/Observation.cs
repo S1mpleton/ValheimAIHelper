@@ -26,6 +26,7 @@ internal sealed class Observation
         ["Fermenter"]="fermenter", ["Fireplace"]="fire", ["Beehive"]="beehive", ["Bed"]="bed",
         ["Chair"]="chair", ["ItemStand"]="item_stand", ["ArmorStand"]="item_stand", ["Switch"]="station_input"
     };
+    internal static IEnumerable<ItemDrop> LoadedDrops() => dropInstances?.GetValue(null) as IEnumerable<ItemDrop> ?? UnityEngine.Object.FindObjectsOfType<ItemDrop>();
     internal static string Id(Character c) => "character:" + c.GetInstanceID();
     internal static string WorldId(Component c) => "world:" + c.GetInstanceID();
     internal static string ItemId(ItemDrop.ItemData item, bool container = false) => (container ? "container-item:" : "inventory:") + RuntimeHelpers.GetHashCode(item);
@@ -73,9 +74,10 @@ internal sealed class Observation
         var o=new Observation(); var origin=actor.transform.position; var entities=new List<Entity>();
         var inventory=actor.GetInventory().GetAllItems().Where(i=>i!=null && i.m_stack>0).Take(64).ToArray();
         foreach(var item in inventory) o.Items[ItemId(item)]=item;
-        if(leader && !leader!.IsDead() && Vector3.Distance(origin,leader.transform.position)<=60)
+        o.Data.leader_status = leader ? "out_of_range" : "unavailable";
+        if(leader && !leader!.IsDead() && Vector3.Distance(origin,leader.transform.position)<=128)
         {
-            string id=Id(leader);o.Characters[id]=leader;o.Data.leader_id=id;
+            string id=Id(leader);o.Characters[id]=leader;o.Data.leader_id=id;o.Data.leader_status="visible";
             entities.Add(new Entity {id=id,name=Name(leader.GetPlayerName()),kind="player",position=Pos(leader.transform.position),distance=Vector3.Distance(origin,leader.transform.position)});
         }
         foreach(var other in Player.GetAllPlayers().Where(p=>p && !CompanionNpc.Is(p) && p!=actor && p!=leader && !p.IsDead() && Vector3.Distance(origin,p.transform.position)<=60)
@@ -96,15 +98,14 @@ internal sealed class Observation
         var nearby=hits.Take(count).Where(c=>c).ToArray();
         // Use the game's loaded ItemDrop registry, not the short collider query
         // for interactions: small drops and drops beyond 20m were disappearing.
-        var loadedDrops = dropInstances?.GetValue(null) as IEnumerable<ItemDrop>;
-        var drops = (loadedDrops ?? UnityEngine.Object.FindObjectsOfType<ItemDrop>()).Where(d=>d && d.gameObject.activeInHierarchy && d.m_itemData!=null && d.m_itemData.m_stack>0)
+        var drops = LoadedDrops().Where(d=>d && d.gameObject.activeInHierarchy && d.m_itemData!=null && d.m_itemData.m_stack>0)
             .Where(d=>d.GetComponent<ZNetView>() is ZNetView view && view.IsValid() && Vector3.Distance(origin,d.transform.position)<=128)
             .Distinct().OrderBy(d=>Vector3.SqrMagnitude(origin-d.transform.position)).ToArray();
         o.Data.ground_scan_radius=128;o.Data.ground_items_total=drops.Length;o.Data.ground_items_truncated=drops.Length>80;
         foreach(var d in drops.Take(80))
         {
             string id="drop:"+d.GetInstanceID();o.Drops[id]=d;
-            entities.Add(new Entity {id=id,name=Name(d.m_itemData.m_shared.m_name),kind="item",category=d.m_itemData.m_shared.m_itemType.ToString(),
+            entities.Add(new Entity {id=id,name=Name(d.m_itemData.m_shared.m_name),kind="item",interaction="pickup",category=d.m_itemData.m_shared.m_itemType.ToString(),
                 position=Pos(d.transform.position),distance=Vector3.Distance(origin,d.transform.position),count=Mathf.Clamp(d.m_itemData.m_stack,1,100000),
                 weight=ObservationValues.Vital(d.m_itemData.GetWeight()),pickup_allowed=d.CanPickup(false),state=d.CanPickup(false)?"Выпавший предмет":"Подбор временно недоступен игре"});
         }
@@ -117,16 +118,17 @@ internal sealed class Observation
             .OrderBy(c=>Vector3.SqrMagnitude(origin-c.transform.position)).Take(16))
         {
             string id=WorldId(c);o.Interactables[id]=c;var hover=c as Hoverable;
-            entities.Add(new Entity {id=id,name=Name(hover?.GetHoverName()??c.name),kind="interactable",category=categories[c.GetType().Name],
+            entities.Add(new Entity {id=id,name=Name(hover?.GetHoverName()??c.name),kind="interactable",interaction="interact",category=categories[c.GetType().Name],
                 state=Name(hover?.GetHoverText()??"",240),position=Pos(c.transform.position),distance=Vector3.Distance(origin,c.transform.position)});
         }
-        foreach(var c in objects.Where(c=>new[]{"TreeBase","TreeLog","MineRock","MineRock5","Destructible"}.Contains(c.GetType().Name))
+        foreach(var c in objects.Where(c=>ResourcePolicy.IsHarvestResource(c.GetType().Name, c.GetComponent<Pickable>() || c.GetComponent<PickableItem>(), c.GetComponent<ItemDrop>(),
+                c.GetType().Name == "Destructible" && string.Equals(NativeAccess.Read(c,"m_destructibleType")?.ToString(), "Tree", StringComparison.OrdinalIgnoreCase)))
             .Where(c=>!c.GetComponent<Piece>() && Vector3.Distance(origin,c.transform.position)<=20)
             .OrderBy(c=>Vector3.SqrMagnitude(origin-c.transform.position)).Take(8))
         {
             string id=WorldId(c);o.Resources[id]=c;
-            entities.Add(new Entity {id=id,name=Name((c as Hoverable)?.GetHoverName()??c.name),kind="resource",
-                category=c.GetType().Name,position=Pos(c.transform.position),distance=Vector3.Distance(origin,c.transform.position),
+            entities.Add(new Entity {id=id,name=Name((c as Hoverable)?.GetHoverName()??c.name),kind="resource",interaction="gather",required_tool=c.GetType().Name.StartsWith("MineRock")?"pickaxe":"axe",
+                category=c.GetType().Name=="Destructible"?"DestructibleTree":c.GetType().Name,position=Pos(c.transform.position),distance=Vector3.Distance(origin,c.transform.position),
                 tool_tier=Mathf.Clamp(NativeAccess.Read(c,"m_minToolTier") is int tier?tier:0,0,20)});
         }
         foreach(var piece in objects.OfType<Piece>().Where(p=>p.GetComponent<WearNTear>() && !o.Interactables.ContainsKey(WorldId(p)))

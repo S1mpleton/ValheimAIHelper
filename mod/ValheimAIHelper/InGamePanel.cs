@@ -52,7 +52,7 @@ public sealed partial class Plugin
     internal static void InstallMenuEntry(Menu menu)
     {
         var plugin = instance;
-        if (plugin?.menuIntegration == null) return;
+        if (plugin?.menuIntegration == null || plugin.menuIntegration.Matches(menu)) return;
         try
         {
             bool wasInstalled = plugin.menuIntegration.Installed;
@@ -65,6 +65,12 @@ public sealed partial class Plugin
             }
         }
         catch (Exception ex) { plugin.AddLog("menu", ex.ToString() + "; " + GameUi.Describe(menu)); }
+    }
+
+    internal static void RefreshMenuNavigation(Menu menu)
+    {
+        var integration = instance?.menuIntegration;
+        if (integration != null && integration.Matches(menu)) integration.RefreshNavigation();
     }
 
     private void OpenPanelFromMenu()
@@ -83,7 +89,9 @@ public sealed partial class Plugin
         try
         {
             nativeWindow ??= new NativeControlWindow(this);
+            var opening = System.Diagnostics.Stopwatch.StartNew();
             nativeWindow.Open();
+            AddLog("ui-time", "Окно управления: " + opening.ElapsedMilliseconds + " мс");
         }
         catch (Exception ex) { AddLog("ui", "Игровое окно: " + ex + ". Открыта резервная панель F8."); }
         nextUiPoll = 0;

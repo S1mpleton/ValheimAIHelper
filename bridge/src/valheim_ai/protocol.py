@@ -106,6 +106,8 @@ class Entity(StrictModel):
     attacking: bool = False
     category: str = Field(default="", max_length=40)
     state: str = Field(default="", max_length=240)
+    interaction: str = Field(default="", pattern="^(|pickup|interact|gather)$")
+    required_tool: str = Field(default="", pattern="^(|axe|pickaxe)$")
     tool_tier: int = Field(default=0, ge=0, le=20)
     count: int = Field(default=1, ge=1, le=100000)
     weight: float = Field(default=0, ge=0)
@@ -139,7 +141,11 @@ class Snapshot(StrictModel):
     ground_items_total: int = Field(default=0, ge=0)
     ground_items_truncated: bool = False
     leader_id: str = Field(default="", max_length=100)
+    leader_name: str = Field(default="", max_length=120)
+    leader_status: str = Field(default="", pattern="^(|visible|unavailable|out_of_range)$")
+    motor_state: str = Field(default="", max_length=120)
     previous_result: str = Field(default="", max_length=240)
+    simulation_paused: bool = False
     background_planning: bool = False
     listen_chat: bool = True
     plan_id: str = Field(default="", max_length=80)
@@ -381,6 +387,9 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
         valid = target is not None and target.kind == "animal"
     elif decision.action == Action.GATHER:
         valid = target is not None and target.kind == "resource"
+        if valid and target.required_tool:
+            from .affordances import can_gather
+            if not can_gather(target, snapshot.actor.inventory): raise ValueError("Required gathering tool is missing or inadequate")
     elif decision.action in (Action.OPEN, Action.TAKE, Action.DEPOSIT, Action.STACK):
         valid = target is not None and target.category == "container"
         if decision.action in (Action.TAKE, Action.DEPOSIT):

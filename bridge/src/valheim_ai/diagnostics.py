@@ -12,6 +12,7 @@ FIELDS = frozenset({
     "recipes", "requirements", "craftable", "station", "amount", "build_options", "available", "container_id", "container_inventory",
     "daylight", "weather", "background_planning", "listen_chat", "plan_id", "action_status", "recent_events", "actor_name", "speaker", "text", "explicit_address", "ollama_url",
     "steps", "action", "target_id", "duration", "say", "destination", "run", "item_id", "rotation", "chat_intent", "message_id", "addressed", "reply", "combat_policy", "objective_complete", "pickup_allowed",
+    "leader_name", "leader_status", "motor_state", "simulation_paused", "interaction", "required_tool", "selection", "quest", "item_key", "action_completed_amount",
     "ground_scan_radius", "ground_items_total", "ground_items_truncated",
 })
 

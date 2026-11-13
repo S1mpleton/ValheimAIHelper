@@ -12,8 +12,14 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
     <Compile Include="../ValheimAIHelper/Protocol.cs" Link="Protocol.cs" />
     <Compile Include="../ValheimAIHelper/NpcAuthorityPolicy.cs" Link="NpcAuthorityPolicy.cs" />
+    <Compile Include="../ValheimAIHelper/WorkIdentity.cs" Link="WorkIdentity.cs" />
+    <Compile Include="../ValheimAIHelper/LeaderSelection.cs" Link="LeaderSelection.cs" />
+    <Compile Include="../ValheimAIHelper/FollowController.cs" Link="FollowController.cs" />
+    <Compile Include="../ValheimAIHelper/MotorPolicy.cs" Link="MotorPolicy.cs" />
+    <Compile Include="../ValheimAIHelper/UiReflection.cs" Link="UiReflection.cs" />
     <Compile Include="../ValheimAIHelper/NavigationPolicy.cs" Link="NavigationPolicy.cs" />
     <Compile Include="../ValheimAIHelper/TransferBatch.cs" Link="TransferBatch.cs" />
+    <Compile Include="../ValheimAIHelper/ResourcePolicy.cs" Link="ResourcePolicy.cs" />
     <Compile Include="../ValheimAIHelper/TransferPolicy.cs" Link="TransferPolicy.cs" />
     <Compile Include="../ValheimAIHelper/DecisionPolicy.cs" Link="DecisionPolicy.cs" />
     <Compile Include="../ValheimAIHelper/WireJson.cs" Link="WireJson.cs" />

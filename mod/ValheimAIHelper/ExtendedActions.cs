@@ -118,7 +118,21 @@ internal sealed partial class ActionExecutor
         bool mining = resource.GetType().Name.StartsWith("MineRock");
         bool tool = weapon != null && (mining ? weapon.m_shared.m_skillType == Skills.SkillType.Pickaxes : weapon.m_shared.m_skillType == Skills.SkillType.Axes);
         int tier = NativeAccess.Read(resource, "m_minToolTier") is int required ? required : 0;
-        if (!tool || weapon!.m_shared.m_toolTier < tier || weapon.m_durability <= 0) { Finish("Нужен исправный подходящий топор/кирка требуемого уровня", false); return; }
+        if (!tool || weapon!.m_shared.m_toolTier < tier || weapon.m_durability <= 0)
+        {
+            var candidate = player.GetInventory().GetAllItems().Where(i => i.m_stack > 0 && i.IsEquipable() && i.m_durability > 0 &&
+                i.m_shared.m_skillType == (mining ? Skills.SkillType.Pickaxes : Skills.SkillType.Axes) && i.m_shared.m_toolTier >= tier)
+                .OrderByDescending(i => i.m_shared.m_toolTier).FirstOrDefault();
+            if (candidate == null) { Finish(mining ? "Для добычи этой залежи нужна исправная кирка нужного уровня; выпавшие вещи подбираются без неё" : "Для рубки дерева нужен исправный топор нужного уровня; растения собираются взаимодействием", false); return; }
+            if (Time.time >= nextUse)
+            {
+                if (!candidate.m_equipped) player.UseItem(player.GetInventory(), candidate, true);
+                else player.ShowHandItems();
+                nextUse = Time.time + 2;
+            }
+            Result = "Экипирую инструмент для добычи: " + Observation.Name(candidate.m_shared.m_name);
+            return;
+        }
         var collider = resource.GetComponentsInChildren<Collider>().OrderBy(c => Vector3.SqrMagnitude(c.ClosestPoint(player.GetCenterPoint()) - player.GetCenterPoint())).FirstOrDefault();
         var point = collider ? collider!.ClosestPoint(player.GetCenterPoint()) : resource.transform.position;
         if (Vector3.Distance(player.transform.position, point) > 2.5f) { MoveTo(player, point, 1.7f); return; }

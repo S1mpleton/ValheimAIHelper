@@ -11,16 +11,19 @@ namespace ValheimAIHelper;
 internal sealed class EscMenuIntegration : IDisposable
 {
     private GameObject? buttonObject;
-    private Component? button;
+    private Component? button, sourceButton;
     private Menu? owner;
     private readonly Action open;
     private readonly Dictionary<RectTransform, Vector2> manualPositions = new();
 
     public EscMenuIntegration(Action open) { this.open = open; }
     public bool Installed => buttonObject;
+    public bool Matches(Menu menu) => owner == menu && buttonObject && button;
+    public void RefreshNavigation() { if (sourceButton && button) LinkNavigation(sourceButton!, button!); }
 
     public void Install(Menu menu)
     {
+        if (Matches(menu)) return;
         // Reflect UI-only fields so changes to TMPro/UGUI assembly versions don't
         // introduce another runtime dependency into the mod.
         var source = GameUi.MenuButton(menu);
@@ -29,12 +32,12 @@ internal sealed class EscMenuIntegration : IDisposable
         if (owner != menu || !buttonObject)
         {
             Dispose();
-            owner = menu;
+            owner = menu; sourceButton = source;
             buttonObject = UnityEngine.Object.Instantiate(entry.gameObject, entry.parent, false);
             buttonObject.name = "ValheimAIHelperButton";
             buttonObject.transform.SetSiblingIndex(entry.GetSiblingIndex() + 1);
             buttonObject.SetActive(true);
-            button = buttonObject.GetComponentInChildren(AccessTools.TypeByName("UnityEngine.UI.Button"), true);
+            button = buttonObject.GetComponentInChildren(GameUi.FindType("UnityEngine.UI.Button"), true);
             if (button == null) { Dispose(); return; }
             foreach (var behaviour in buttonObject.GetComponentsInChildren<Behaviour>(true))
             {
@@ -86,12 +89,12 @@ internal sealed class EscMenuIntegration : IDisposable
     private void LayoutWithoutGroup(Transform entry)
     {
         var parent = entry.parent;
-        var layoutType = AccessTools.TypeByName("UnityEngine.UI.LayoutGroup");
+        var layoutType = GameUi.FindType("UnityEngine.UI.LayoutGroup");
         if (!parent || (layoutType != null && parent.GetComponent(layoutType))) return;
         var sourceRect = entry as RectTransform;
         var inserted = buttonObject!.transform as RectTransform;
         if (sourceRect == null || inserted == null) return;
-        var buttonType = AccessTools.TypeByName("UnityEngine.UI.Button");
+        var buttonType = GameUi.FindType("UnityEngine.UI.Button");
         var siblings = parent.Cast<Transform>().Where(t => t != inserted && buttonType != null && t.GetComponentInChildren(buttonType, true))
             .OfType<RectTransform>().ToArray();
         foreach (var rect in siblings) if (!manualPositions.ContainsKey(rect)) manualPositions[rect] = rect.anchoredPosition;
@@ -105,12 +108,12 @@ internal sealed class EscMenuIntegration : IDisposable
 
     private static void LinkNavigation(Component source, Component inserted)
     {
-        var property = source.GetType().GetProperty("navigation");
+        var property = UiReflection.Property(source.GetType(), "navigation");
         if (property == null) return;
         object sourceNavigation = property.GetValue(source, null);
         var type = sourceNavigation.GetType();
-        var up = type.GetProperty("selectOnUp");
-        var down = type.GetProperty("selectOnDown");
+        var up = UiReflection.Property(type, "selectOnUp");
+        var down = UiReflection.Property(type, "selectOnDown");
         var next = down?.GetValue(sourceNavigation, null) as Component;
         if (next == inserted) return;
         object insertedNavigation = property.GetValue(inserted, null);
@@ -131,7 +134,7 @@ internal sealed class EscMenuIntegration : IDisposable
     {
         if (buttonObject) UnityEngine.Object.Destroy(buttonObject);
         buttonObject = null;
-        button = null;
+        button = sourceButton = null;
         owner = null;
         manualPositions.Clear();
     }
@@ -142,7 +145,7 @@ internal static class EscMenuPatch
 {
     private static IEnumerable<MethodBase> TargetMethods()
     {
-        foreach (string name in new[] { "Start", "Show", "UpdateNavigation" })
+        foreach (string name in new[] { "Start", "Show" })
         {
             var method = AccessTools.Method(typeof(Menu), name);
             if (method != null) yield return method;
@@ -156,4 +159,12 @@ internal static class PanelInputFocusPatch
 {
     // Native player/camera input honours the same menu-focus check.
     private static void Postfix(ref bool __result) { if (Plugin.PanelOpen) __result = true; }
+}
+
+// Hover/controller navigation may run every frame. Only repair cached links;
+// never rediscover the menu hierarchy from this callback.
+[HarmonyPatch(typeof(Menu), "UpdateNavigation")]
+internal static class EscNavigationPatch
+{
+    private static void Postfix(Menu __instance) => Plugin.RefreshMenuNavigation(__instance);
 }

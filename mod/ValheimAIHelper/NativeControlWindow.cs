@@ -18,6 +18,7 @@ public sealed partial class Plugin
         private Component? textTemplate, canvas;
         private readonly List<GameObject> pages = new();
         private readonly List<Component> busyButtons = new();
+        private readonly Dictionary<Component, Component> buttonCaptions = new();
         private readonly List<Component> tabs = new();
         private readonly List<GameObject> tabMarkers = new();
         private Component? npcInput, npcLabel, stateLabel, messageLabel, leaderLabel, combatButton, foodButton, controlButton, logText;
@@ -28,20 +29,23 @@ public sealed partial class Plugin
         private int page, modelPage, logPage;
         private float nextRefresh;
         private bool built, additional;
+        private readonly HashSet<int> builtPages = new();
+        private Vector2 cachedSettings;
+        private float nextLayout;
         public bool Ready => built && root && frame;
         public NativeControlWindow(Plugin plugin) { p = plugin; }
 
-        private static Type Type(string name) => AccessTools.TypeByName(name) ?? throw new InvalidOperationException("Missing game UI: " + name);
-        private static object? Get(Component c, string name) => c.GetType().GetProperty(name)?.GetValue(c, null);
-        private static void Set(Component c, string name, object? value) => c.GetType().GetProperty(name)?.SetValue(c, value, null);
+        private static Type Type(string name) => GameUi.FindType(name) ?? throw new InvalidOperationException("Missing game UI: " + name);
+        private static object? Get(Component c, string name) => UiReflection.Property(c.GetType(), name)?.GetValue(c, null);
+        private static void Set(Component c, string name, object? value) => UiReflection.Write(c, name, value);
         private static void EnumValue(Component c, string name, string value)
         {
-            var prop = c.GetType().GetProperty(name);
-            if (prop != null && prop.CanWrite) prop.SetValue(c, Enum.Parse(prop.PropertyType, value), null);
+            var prop = UiReflection.Property(c.GetType(), name);
+            if (prop != null && prop.CanWrite) { var next = Enum.Parse(prop.PropertyType, value); if (!Equals(prop.GetValue(c, null), next)) prop.SetValue(c, next, null); }
         }
         private static Component? Find(GameObject obj, string type)
         {
-            var expected = AccessTools.TypeByName(type) ?? AccessTools.TypeByName("TMPro." + type);
+            var expected = GameUi.FindType(type) ?? GameUi.FindType("TMPro." + type);
             return obj.GetComponentsInChildren<Component>(true)
                 .FirstOrDefault(c => c && (c.GetType().Name == type || expected?.IsAssignableFrom(c.GetType()) == true));
         }
@@ -61,7 +65,7 @@ public sealed partial class Plugin
             foreach (var c in obj.GetComponentsInChildren<Behaviour>(true))
             {
                 string ns = c.GetType().Namespace ?? "";
-                if (ns != "UnityEngine.UI" && ns != "TMPro" && AccessTools.TypeByName("TMPro.TMP_InputField")?.IsAssignableFrom(c.GetType()) != true) c.enabled = false;
+                if (ns != "UnityEngine.UI" && ns != "TMPro" && GameUi.FindType("TMPro.TMP_InputField")?.IsAssignableFrom(c.GetType()) != true) c.enabled = false;
                 if (c.GetType().Name is "TextMeshProUGUI" or "Text") Set(c, "raycastTarget", false);
             }
         }
@@ -98,6 +102,7 @@ public sealed partial class Plugin
             var button = obj.AddComponent(Type("UnityEngine.UI.Button"));
             Set(button, "targetGraphic", obj.GetComponent(Type("UnityEngine.UI.Image")));
             var buttonCaption = Label(obj.transform, text, 8, 5, w - 16, 26, 18);
+            buttonCaptions[button] = buttonCaption;
             EnumValue(buttonCaption, "alignment", "Center"); Set(buttonCaption, "color", new Color(1, .73f, .27f));
             // The default white/white ColorBlock does not visibly highlight a
             // brown image. Give every action and tab explicit pointer states.
@@ -117,10 +122,9 @@ public sealed partial class Plugin
             { Set(label, "text", text); Set(label, "fontSize", 18f); Set(label, "enableAutoSizing", true); Set(label, "fontSizeMin", 12f); Set(label, "fontSizeMax", 18f); }
             obj.SetActive(true); if (busy) busyButtons.Add(button); return button;
         }
-        private static void ButtonText(Component? button, string text)
+        private void ButtonText(Component? button, string text)
         {
-            if (!button) return;
-            foreach (var label in button!.GetComponentsInChildren<Component>(true).Where(c => c && c.GetType().Name is "TextMeshProUGUI" or "Text")) Set(label, "text", text);
+            if (button && buttonCaptions.TryGetValue(button!, out var caption) && caption) Set(caption, "text", text);
         }
         private Component InputField(Transform parent, string value, float x, float y, float w, float h,
             int limit, Action<string> changed, bool password = false, bool multiline = false)
@@ -200,7 +204,7 @@ public sealed partial class Plugin
                 Image(marker, new Color(.85f, .59f, .18f), false); tabMarkers.Add(marker);
                 pages.Add(Box("Tab " + i, frame.transform, 24, 166, 812, 382));
             }
-            BuildCharacter(pages[0].transform); BuildConnection(pages[1].transform); BuildJournal(pages[2].transform);
+            BuildCharacter(pages[0].transform); builtPages.Add(0);
             messageLabel = Label(frame.transform, "", 24, 554, 812, 44, 14);
             Button(frame.transform, "Назад", 24, 606, 160, () => { p.SetPanel(false); if (Menu.instance) Menu.instance.Show(); });
             Label(frame.transform, "F8 — окно управления     F9 — немедленный стоп", 208, 615, 624, 24, 15);
@@ -294,6 +298,14 @@ public sealed partial class Plugin
         }
         private void ShowPage()
         {
+            if (!builtPages.Contains(page))
+            {
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                if (page == 1) BuildConnection(pages[1].transform);
+                else if (page == 2) BuildJournal(pages[2].transform);
+                builtPages.Add(page);
+                p.AddLog("ui-time", "Вкладка " + page + ": " + timer.ElapsedMilliseconds + " мс");
+            }
             for (int i = 0; i < pages.Count; i++)
             {
                 pages[i].SetActive(i == page); tabMarkers[i].SetActive(i == page);
@@ -302,7 +314,7 @@ public sealed partial class Plugin
                     Set(caption, "color", i == page ? new Color(1, .77f, .35f) : new Color(.77f, .74f, .65f));
             }
             characterMain!.SetActive(!additional); characterAdvanced!.SetActive(additional);
-            journalMain!.SetActive(!p.uiDialogue); dialoguePanel!.SetActive(p.uiDialogue);
+            if (journalMain) journalMain!.SetActive(!p.uiDialogue); if (dialoguePanel) dialoguePanel!.SetActive(p.uiDialogue);
             Refresh(true);
         }
         public void Refresh(bool force = false)
@@ -311,21 +323,50 @@ public sealed partial class Plugin
             nextRefresh = Time.realtimeSinceStartup + .2f;
             float nativeScale = Menu.instance ? GameUi.InterfaceScale(Menu.instance) : 1;
             Set(canvas!, "scaleFactor", nativeScale);
-            Vector2 settings = Menu.instance ? GameUi.SettingsSize(Menu.instance) : Vector2.zero;
+            if (force || Time.realtimeSinceStartup >= nextLayout) { cachedSettings = Menu.instance ? GameUi.SettingsSize(Menu.instance) : Vector2.zero; nextLayout = Time.realtimeSinceStartup + 1; }
+            Vector2 settings = cachedSettings;
             frame!.transform.localScale = Vector3.one * UiLayout.Fit(Screen.width / nativeScale, Screen.height / nativeScale, settings.x, settings.y);
             Set(stateLabel!, "text", !p.active ? "NPC остановлен; ваш персонаж — под вашим управлением" : p.executor.Result + (p.bridgeStatus?.performance?.current != null ? " · AI: " + p.bridgeStatus.performance.current.elapsed_seconds?.ToString("0") + " с" : ""));
             Set(messageLabel!, "text", p.journal.Redact(p.uiError.Length > 0 ? p.uiError : p.uiMessage));
             Set(messageLabel!, "color", p.uiError.Length > 0 ? new Color(1, .55f, .4f) : new Color(.85f, .75f, .45f));
             var leader = p.FindLeader();
-            if (npcLabel != null) Set(npcLabel, "text", p.CurrentNpc ? "NPC: " + p.CurrentNpc!.GetPlayerName() + " · один клиент" : "NPC ещё не загружен. Создайте его в своём мире (хост).");
+            if (npcLabel != null) Set(npcLabel, "text", p.CurrentNpc ? "NPC: " + p.CurrentNpc!.GetPlayerName() + (Player.m_localPlayer && p.CurrentNpc.GetPlayerName() == Player.m_localPlayer.GetPlayerName() ? " · имя совпадает с вашим; измените его выше" : " · один клиент") : "NPC ещё не загружен. Создайте его в своём мире (хост).");
             Set(leaderLabel!, "text", "Лидер: " + (leader ? leader!.GetPlayerName() : p.leaderName.Value.Length > 0 ? p.leaderName.Value + " (не виден)" : "не выбран"));
             ButtonText(combatButton, "Бой: " + (p.allowCombat.Value ? "включён" : "выключен"));
             ButtonText(foodButton, "Еда: " + (p.autoSurvival.Value ? "автоматически" : "по команде"));
             ButtonText(controlButton, "Управление персонажем: " + (p.controlByAllPlayers.Value ? "Все игроки" : "Только лидер"));
+            Set(usageLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance));
+            foreach (var button in busyButtons) Set(button, "interactable", !p.uiBusy);
+            if (page == 1) RefreshConnection();
+            else if (page == 2) RefreshJournal();
+        }
+        private void RefreshConnection()
+        {
             ButtonText(providerButton, "Провайдер: " + AiProviders.DisplayName(p.uiProvider));
             Set(credentialLabel!, "text", p.uiProvider == "ollama" ? "Адрес Ollama на этом ПК (API-ключ не нужен)" : "API-ключ (только в памяти до закрытия игры)");
-            Set(usageLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance));
+            Set(keyStatusLabel!, "text", p.uiProvider == "ollama" ? "Локальная модель · API-ключ не нужен" : p.HasKey(p.uiProvider) ? "API-ключ уже задан в памяти службы" : "Введите API-ключ и сохраните подключение");
+            EnumValue(keyInput!, "contentType", p.uiProvider == "ollama" ? "Standard" : "Password");
+            foreach (var input in new[] { keyInput, modelInput, intervalInput }) if (input != null) Set(input, "interactable", !p.uiBusy);
+            Sync(modelInput, p.uiModel); Sync(keyInput, p.uiProvider == "ollama" ? p.uiOllamaUrl : p.uiKey); Sync(intervalInput, p.uiInterval);
+            for (int i = 0; i < modelButtons.Count; i++)
+            {
+                int index = modelPage * 2 + i; bool available = index < p.uiModels.Length;
+                if (modelButtons[i].gameObject.activeSelf != available) modelButtons[i].gameObject.SetActive(available);
+                if (available) ButtonText(modelButtons[i], (p.uiModel == p.uiModels[index] ? "✓ " : "") + p.uiModels[index]);
+            }
+        }
+        private void RefreshJournal()
+        {
             Set(performanceLabel!, "text", AiPerformanceText.Summary(p.bridgeStatus?.performance) + "\n" + AiPerformanceText.Details(p.bridgeStatus?.performance));
+            if (!p.uiDialogue)
+            {
+                string[] lines = p.journal.Text.Split('\n');
+                logPage = Math.Min(logPage, Math.Max(0, (lines.Length - 1) / 7));
+                int start = Math.Max(0, lines.Length - (logPage + 1) * 7);
+                Set(logText!, "text", string.Join("\n", lines.Skip(start).Take(Math.Min(7, lines.Length - start))
+                    .Select(l => l.Length > 160 ? l.Substring(0, 157) + "..." : l)).Replace("\n\n", "\n"));
+                return;
+            }
             Set(dialogueHeader!, "text", p.DialogueTitle);
             if ((Get(dialogueBody!, "text") as string) != p.dialogueText)
             {
@@ -337,29 +378,13 @@ public sealed partial class Plugin
             Set(dialogueCopy!, "interactable", canExport); Set(dialogueSave!, "interactable", canExport);
             for (int i = 0; i < dialogueTabs.Count; i++)
                 Set(dialogueTabs[i].GetComponent(Type("UnityEngine.UI.Image")), "color", p.dialoguePart == new[] { "request", "response", "result" }[i] ? new Color(.42f, .31f, .13f) : new Color(.12f, .10f, .07f));
-            Set(keyStatusLabel!, "text", p.uiProvider == "ollama" ? "Локальная модель · API-ключ не нужен" : p.HasKey(p.uiProvider) ? "API-ключ уже задан в памяти службы" : "Введите API-ключ и сохраните подключение");
-            EnumValue(keyInput!, "contentType", p.uiProvider == "ollama" ? "Standard" : "Password");
-            foreach (var button in busyButtons) Set(button, "interactable", !p.uiBusy);
-            foreach (var input in new[] { keyInput, modelInput, intervalInput }) if (input != null) Set(input, "interactable", !p.uiBusy);
-            Sync(modelInput, p.uiModel); Sync(keyInput, p.uiProvider == "ollama" ? p.uiOllamaUrl : p.uiKey); Sync(intervalInput, p.uiInterval);
-            for (int i = 0; i < modelButtons.Count; i++)
-            {
-                int index = modelPage * 2 + i; bool available = index < p.uiModels.Length;
-                modelButtons[i].gameObject.SetActive(available);
-                if (available) ButtonText(modelButtons[i], (p.uiModel == p.uiModels[index] ? "✓ " : "") + p.uiModels[index]);
-            }
-            string[] lines = p.journal.Text.Split('\n');
-            logPage = Math.Min(logPage, Math.Max(0, (lines.Length - 1) / 7));
-            int start = Math.Max(0, lines.Length - (logPage + 1) * 7);
-            Set(logText!, "text", string.Join("\n", lines.Skip(start).Take(Math.Min(7, lines.Length - start))
-                .Select(l => l.Length > 160 ? l.Substring(0, 157) + "..." : l)).Replace("\n\n", "\n"));
         }
         public void Dispose()
         {
             built = false;
             if (root) UnityEngine.Object.Destroy(root);
             root = frame = characterMain = characterAdvanced = journalMain = dialoguePanel = null; canvas = null;
-            pages.Clear(); busyButtons.Clear(); modelButtons.Clear(); tabs.Clear(); tabMarkers.Clear(); dialogueTabs.Clear();
+            pages.Clear(); builtPages.Clear(); busyButtons.Clear(); buttonCaptions.Clear(); modelButtons.Clear(); tabs.Clear(); tabMarkers.Clear(); dialogueTabs.Clear();
         }
     }
 }

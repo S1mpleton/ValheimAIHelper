@@ -11,12 +11,20 @@ internal sealed partial class ActionExecutor
 {
     private Decision? decision;
     private Observation? observation;
-    private float expires, nextPath, nextAttack, nextJump, nextSurvival, lastProgress, bowStarted;
+    private float expires, nextAttack, nextJump, nextSurvival, lastProgress, bowStarted;
     private Vector3 lastPosition, moveTarget, lastPathGoal;
     private float pathFailedSince = -1;
     private int pathFailures;
     private float blockedAt;
-    private readonly List<Vector3> path = new();
+    private readonly List<Vector3> path = new(), candidatePath = new();
+    private readonly NavigationGate navigationGate = new();
+    private readonly FollowController follow = new();
+    private bool validControl;
+    private string terminalOutcome = "";
+    public bool ReflexActive { get; private set; }
+    public bool CancelAttacks => MotorPolicy.Cancel(validControl, ReflexActive, ActionStatus);
+    public string Outcome => ActionStatus == "success" || ActionStatus == "blocked" ? terminalOutcome : Result;
+    public string MotorState { get; private set; } = "idle";
     private ItemDrop.ItemData? usedItem;
     private int oldStack;
     private float usedAt;
@@ -28,15 +36,15 @@ internal sealed partial class ActionExecutor
 
     public void Set(Decision value, Observation from, Player player)
     {
-        bool same = decision != null && (value.plan_id ?? "") == PlanId && decision.action == value.action && decision.target_id == value.target_id && decision.source == value.source && decision.mode == value.mode;
+        bool same = decision != null && WorkIdentity.Same(decision, value);
         observation = from;
         expires = Time.realtimeSinceStartup + value.duration;
-        if (same && !(value.action == "follow" && ActionStatus == "blocked" && Time.time - blockedAt >= 8)) { decision = value; return; } // Renew policy/flags while preserving execution state.
-        ResetExtended(value); CompletedAmount = 0;
+        if (same && !((value.action == "follow" || value.action == "wait") && ActionStatus == "blocked" && (Time.time - blockedAt >= 8 || terminalOutcome == "Нет свежих данных от службы; управление приостановлено"))) { decision = value; return; } // Renew policy/flags while preserving execution state.
+        ResetExtended(value); CompletedAmount = 0; terminalOutcome = ""; navigationGate.Reset(); follow.Reset();
         decision = value;
         PlanId = value.plan_id ?? "";
         ActionStatus = "running";
-        nextPath = 0; bowStarted = 0; usedItem = null; pathFailedSince = -1; pathFailures = 0; lastPathGoal = new Vector3(float.MaxValue, 0, 0);
+        bowStarted = 0; usedItem = null; pathFailedSince = -1; pathFailures = 0; lastPathGoal = new Vector3(float.MaxValue, 0, 0);
         lastProgress = Time.time;
         lastPosition = player.transform.position;
         var forward = player.transform.forward; forward.y = 0;
@@ -47,6 +55,7 @@ internal sealed partial class ActionExecutor
 
     public void Stop(Player? player, string reason)
     {
+        validControl = false; ReflexActive = false; MotorState = "stopped"; terminalOutcome = ""; navigationGate.Reset(); follow.Reset();
         decision = null; observation = null; PlanId = ""; ActionStatus = ""; CompletedAmount = 0;
         inventorySession.Close(); placementPulse = false;
         transfer = null;
@@ -55,8 +64,8 @@ internal sealed partial class ActionExecutor
     }
 
     private void Finish(string result, bool success = true)
-    { Result = result; ActionStatus = success ? "success" : "blocked"; if (!success) blockedAt = Time.time; Input = default; }
-    public void Pause() { Input = default; lastProgress = Time.time; nextPath = 0; }
+    { Result = terminalOutcome = result; ActionStatus = success ? "success" : "blocked"; if (!success) blockedAt = Time.time; Input = default; }
+    public void Pause() { Input = default; lastProgress = Time.time; navigationGate.Reset(); }
 
     public ControlIntent ConsumeInput()
     {
@@ -70,22 +79,36 @@ internal sealed partial class ActionExecutor
         bool block = false, bool jump = false, bool run = false, bool dodge = false, bool secondary = false, bool crouch = false)
     { Input = ControlIntent.Create(movement.x, movement.y, movement.z, attack).With(aim.x, aim.y, aim.z, hold, block, jump, run, dodge, secondary, crouch); }
 
+    private void Reflex(Player player, Action action, string phase)
+    {
+        var outcome = terminalOutcome; var status = ActionStatus; var blocked = blockedAt;
+        ReflexActive = true;
+        try { action(); }
+        finally
+        {
+            ActionStatus = status; terminalOutcome = outcome; blockedAt = blocked;
+            MotorState = phase; lastProgress = Time.time; lastPosition = player.transform.position;
+        }
+    }
+
     public void Tick(Player player, Player? leader, bool allowCombat, bool survival)
     {
-        Input = default;
-        if (decision == null || observation == null) return;
+        Input = default; validControl = false; ReflexActive = false;
+        MotorState = decision?.action ?? "idle";
+        if (decision == null || observation == null || decision.mode == "stop") return;
         if (Time.realtimeSinceStartup >= expires) { if (ActionStatus == "running") Finish("Нет свежих данных от службы; управление приостановлено", false); return; }
         if (!player.IsOwner() || player == Player.m_localPlayer || !CompanionNpc.Is(player) || player.IsDead() || player.IsTeleporting() ||
             (player.IsAttached() && decision.action != "stand" && decision.action != "sleep") ||
             (player.IsSleeping() && decision.action != "sleep"))
         { Finish("Действие недоступно в текущем состоянии", false); return; }
         if (decision.mode == "stop" || (string.IsNullOrEmpty(decision.mode) && decision.action == "wait" && decision.source == "local")) return;
+        validControl = true;
         if (decision.avoid_combat)
         {
             allowCombat = false;
             var danger = Character.GetAllCharacters().Where(c => Observation.IsEnemy(player, c, leader) && c.GetBaseAI()?.GetTargetCreature() == player &&
                 Vector3.Distance(c.transform.position, player.transform.position) < 5).FirstOrDefault();
-            if (danger) { inventorySession.Close(); Retreat(player, danger, leader); return; }
+            if (danger) { inventorySession.Close(); Reflex(player, () => Retreat(player, danger, leader), "reflex:retreat"); return; }
         }
         if (survival && !new[] { "eat", "use", "drop", "give", "deposit", "use_on", "craft", "upgrade" }.Contains(decision.action)) PrepareSurvival(player);
         if (allowCombat && new[] { "follow", "wait", "move", "pickup", "give", "interact", "gather", "rest", "open", "take", "deposit", "craft", "repair", "build", "repair_building" }.Contains(decision.action))
@@ -107,7 +130,7 @@ internal sealed partial class ActionExecutor
                     { if (combatWeapon != null) player.UseItem(player.GetInventory(), combatWeapon, true); else player.HideHandItems(); nextSurvival = Time.time + 2; }
                     return;
                 }
-                Fight(player, threat, leader, true); return;
+                Reflex(player, () => Fight(player, threat, leader, true), "reflex:defence"); return;
             }
         }
         if (ActionStatus != "running") return;
@@ -122,9 +145,14 @@ internal sealed partial class ActionExecutor
                 { Input = Input.With(jump: true, run: Input.Run); nextJump = Time.time + 1.5f; }
                 return;
             case "follow":
-                if (leader == null || !leader || leader.IsDead() || Observation.Id(leader) != id) { Finish("Лидер не виден", false); return; }
-                MoveTo(player, leader.transform.position, 3, Vector3.Distance(player.transform.position, leader.transform.position) > 8);
-                if (ActionStatus == "success") ActionStatus = "running";
+                if (leader == null || !leader || leader.IsDead() || Observation.Id(leader) != id)
+                { follow.Approach(0, 0, false); MotorState = follow.Phase; Finish("Лидер не виден; выберите игрока во вкладке «Персонаж»", false); return; }
+                var separation = leader.transform.position - player.transform.position;
+                bool approach = follow.Approach(new Vector2(separation.x, separation.z).magnitude, separation.y, true);
+                MotorState = follow.Phase;
+                if (!approach) { Controls(Vector3.zero, separation); Result = "Рядом с лидером: " + leader.GetPlayerName(); lastProgress = Time.time; return; }
+                MoveTo(player, leader.transform.position, 2.5f, separation.magnitude > 8, 128);
+                if (ActionStatus == "success") { ActionStatus = "running"; Result = "Рядом с лидером: " + leader.GetPlayerName(); }
                 return;
             case "pickup":
                 PickupItem(player);
@@ -134,6 +162,20 @@ internal sealed partial class ActionExecutor
                 if (Vector3.Distance(player.transform.position, target.transform.position) > 2) MoveTo(player, target.transform.position, 1.5f);
                 else
                 {
+                    if (target is Pickable || target is PickableItem)
+                    {
+                        // Pickable.Interact returns whether to animate, NOT
+                        // whether harvest succeeded. Check the game change.
+                        var position = target.transform.position;
+                        var before = new HashSet<int>(Observation.LoadedDrops().Where(d => d).Select(d => d.GetInstanceID()));
+                        int amount = player.GetInventory().GetAllItems().Sum(i => i.m_stack);
+                        ((Interactable)target).Interact(player, false, false);
+                        bool bagChanged = player.GetInventory().GetAllItems().Sum(i => i.m_stack) > amount;
+                        bool spawned = Observation.LoadedDrops().Any(d => d && !before.Contains(d.GetInstanceID()) && Vector3.Distance(d.transform.position, position) <= 3);
+                        bool harvested = !target || NativeAccess.Read(target, "m_picked") is true;
+                        Finish(harvested || spawned || bagChanged ? bagChanged ? "Сбор подтверждён: инвентарь пополнился" : "Растение собрано; появившиеся вещи подбираются действием pickup" : "Игра ещё не подтвердила сбор растения", harvested || spawned || bagChanged);
+                        return;
+                    }
                     bool ok;
                     if (target is Container container) { inventorySession.Open(player, container); ok = NativeInventorySession.HasAccess(player, container); }
                     else if (target is CraftingStation station) ok = NpcInventory.SelectStation(player, station);
@@ -242,49 +284,52 @@ internal sealed partial class ActionExecutor
         if (player.IsEncumbered()) { Finish("Перегрузка инвентаря", false); return; }
         if (distance > maxDistance || !Pathfinding.instance) { Finish("Цель за пределами доступной навигации", false); return; }
         bool movingGoal = Vector3.Distance(target, lastPathGoal) > 1.5f;
-        if (Time.time >= nextPath || movingGoal)
+        if (navigationGate.Due(Time.time, movingGoal))
         {
-            path.Clear(); nextPath = Time.time + .9f; lastPathGoal = target;
+            navigationGate.Attempted(Time.time); lastPathGoal = target; MotorState = decision!.action + ":find_path";
             bool found = false;
             // Native navmesh tiles may still be building. Try a full route to
             // the goal and nearby approach points instead of walking a partial
             // path or declaring failure on the first unavailable tile.
-            for (int candidate = 0; candidate < 9 && !found; candidate++)
+            for (int candidate = 0; candidate < 3 && !found; candidate++)
             {
-                float angle = candidate * Mathf.PI / 4;
+                float angle = (pathFailures * 2 + candidate) * Mathf.PI / 4;
                 var point = candidate == 0 ? target : target + new Vector3(Mathf.Cos(angle), 0, Mathf.Sin(angle)) * Mathf.Min(stopDistance * .75f, 1.4f);
                 if (Physics.Raycast(point + Vector3.up * 2, Vector3.down, out var hit, 4,
                     LayerMask.GetMask("Default", "static_solid", "terrain", "piece"), QueryTriggerInteraction.Ignore) && Mathf.Abs(hit.point.y - target.y) < 1.2f)
                     point.y = hit.point.y;
-                path.Clear();
-                found = Pathfinding.instance.GetPath(origin, point, path, Pathfinding.AgentType.HumanoidNoSwim, true) && path.Count > 0;
+                candidatePath.Clear();
+                found = Pathfinding.instance.GetPath(origin, point, candidatePath, Pathfinding.AgentType.HumanoidNoSwim, true) && candidatePath.Count > 0;
             }
             if (!found)
             {
                 if (pathFailedSince < 0) pathFailedSince = Time.time;
                 pathFailures++;
-                if (!NavigationPolicy.Retry(Time.time - pathFailedSince, pathFailures)) Finish("Пеший маршрут не найден после повторов: препятствие, вода или недоступный этаж", false);
+                if (path.Count == 0 && !NavigationPolicy.Retry(Time.time - pathFailedSince, pathFailures)) Finish("Пеший маршрут не найден после повторов: препятствие, вода или недоступный этаж", false);
                 else Result = "Ожидаю навигацию игры; ищу обход (" + pathFailures + "/8)";
-                return;
+                if (path.Count == 0) { MotorState = decision!.action + ":navigation_wait"; return; }
             }
-            pathFailedSince = -1; pathFailures = 0;
+            else { path.Clear(); path.AddRange(candidatePath); pathFailedSince = -1; pathFailures = 0; }
         }
+        if (path.Count == 0) { MotorState = decision!.action + ":navigation_wait"; return; }
         while (path.Count > 0 && NavigationPolicy.Reached(new Vector2(path[0].x - origin.x, path[0].z - origin.z).magnitude, path[0].y - origin.y, .55f)) path.RemoveAt(0);
-        if (path.Count == 0) { nextPath = 0; return; }
+        if (path.Count == 0) { navigationGate.PathConsumed(Time.time); MotorState = decision!.action + ":repath"; return; }
         var segment = path[0] - origin;
         if (NavigationPolicy.UnsafeSegment(new Vector2(segment.x, segment.z).magnitude, segment.y))
         {
             if (pathFailedSince < 0) pathFailedSince = Time.time;
-            pathFailures++; nextPath = 0;
+            pathFailures++; navigationGate.PathConsumed(Time.time);
             if (Time.time - lastProgress > 8) Finish("Безопасного перехода между уровнями нет; нужна лестница или другой подход", false);
             else Result = "Перестраиваю маршрут вокруг перепада высоты";
             return;
         }
         if (Vector3.Distance(origin, lastPosition) > .25f) { lastPosition = origin; lastProgress = Time.time; }
         bool jump = Time.time - lastProgress > 2 && Time.time >= nextJump && player.IsOnGround() && player.GetStamina() > 25;
-        if (jump) { nextJump = Time.time + 3; nextPath = 0; }
+        if (jump) { nextJump = Time.time + 3; navigationGate.PathConsumed(Time.time); MotorState = decision!.action + ":recover"; }
         if (Time.time - lastProgress > 8) { Finish("NPC застрял: повторный поиск и прыжок не дали продвижения", false); return; }
         segment.y = 0;
-        Controls(segment.normalized, jump: jump, run: run && player.GetStamina() > 30 && !player.IsSwimming());
+        if (!jump) MotorState = decision!.action + ":walk_path";
+        float speed = Mathf.Clamp((distance - stopDistance) / 2f, .35f, 1);
+        Controls(segment.normalized * speed, jump: jump, run: run && player.GetStamina() > 30 && !player.IsSwimming());
     }
 }
