@@ -349,7 +349,7 @@ def test_new_request_cannot_implicitly_resume_restored_tasks(tmp_path,snapshot):
 def test_persistence_never_reuses_transient_instance_targets_or_unconfirmed_transfer(tmp_path,snapshot):
     pool=TaskPool(); atomic=pool.apply_batch([TaskSpec(kind='action',action=Decision(action='interact',target_id='world:123',duration=1,say=''))])[0]
     path=tmp_path/'task.json'; pool.save(path,'world')
-    assert 'world:123' not in path.read_text()
+    assert 'world:123' not in path.read_text(encoding='utf-8')
     loaded=TaskPool.load(path,'world'); loaded.control('resume')
     assert loaded.get(atomic.id).needs_refresh
     assert loaded.next_decision(world(snapshot),now=1)[0].action.value=='wait'
