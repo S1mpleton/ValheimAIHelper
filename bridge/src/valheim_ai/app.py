@@ -25,6 +25,7 @@ from .dialogue import Dialogue, PART_LIMIT
 from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
+from .task_runtime import TaskRuntime
 from .task_policy import companion_duty
 
 
@@ -59,6 +60,16 @@ def validate_model_name(provider: str, name: str):
 class Command(StrictModel):
     mode: str = Field(pattern="^(stop|follow|ai)$")
     objective: str = Field(default="Следуй за лидером и помогай ему выжить.", max_length=1000)
+    pause_tasks: bool = False
+
+
+class TaskControl(StrictModel):
+    action: str = Field(pattern="^(pause|resume|cancel|priority|clear)$")
+    task_id: str = Field(default="", max_length=64)
+    priority: int = Field(default=50, ge=0, le=90)
+    revision: int = Field(default=-1, ge=-1)
+    world_id: str = Field(default="", max_length=100)
+    actor_id: str = Field(default="", max_length=100)
 
 
 class ChatRequest(StrictModel):
@@ -116,6 +127,8 @@ class State:
         self.explicit_chat_id = 0
         self.inference_tasks = set()
         self.dialogue = Dialogue(lambda: [self.token, *self.keys.values()])
+        self.tasks = TaskRuntime(self)
+        self.task_pool = self.tasks.pool
 
     @property
     def ready(self):
@@ -332,7 +345,7 @@ def load_token(data_dir: Path) -> str:
 
 
 def create_app(token: str | None = None, client: httpx.AsyncClient | None = None,
-               ollama_client: httpx.AsyncClient | None = None) -> FastAPI:
+               ollama_client: httpx.AsyncClient | None = None, data_dir: Path | None = None) -> FastAPI:
     owned_client = client is None
     client = client or httpx.AsyncClient(
         timeout=httpx.Timeout(API_TIMEOUT, connect=5), follow_redirects=False,
@@ -340,6 +353,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     )
     token = token or load_token(Path(os.environ.get("VALHEIM_AI_DATA_DIR", ".local")))
     state = State(token, client, ollama_client)
+    if data_dir is not None: state.tasks.storage = Path(data_dir) / "task-pools"
 
     @asynccontextmanager
     async def lifespan(app):
@@ -355,6 +369,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         if check_task is not None: await asyncio.gather(check_task, return_exceptions=True)
         if switch_task is not None: await asyncio.gather(switch_task, return_exceptions=True)
         await state.planner.close()
+        await state.tasks.close()
         if owned_client:
             await client.aclose()
         if state.owns_ollama_client and state.ollama_client is not None:
@@ -388,7 +403,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 length = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid length"}, status_code=400)
-            limit = 2097152 if request.url.path == "/api/decision" else 131072
+            limit = 2097152 if request.url.path in ("/api/decision", "/api/tasks/context") else 131072
             if length < 0 or length > limit:
                 return JSONResponse({"detail": "Request too large"}, status_code=413)
             # Also cap chunked requests rather than trusting Content-Length alone.
@@ -448,11 +463,51 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             "provider_error": state.provider_error,
             "events": list(state.events),
             "instance_id": state.instance_id,
-            "planning": state.planner.task is not None,
+            "planning": state.planner.task is not None or state.tasks.task is not None,
+            "task_pool": state.tasks.status(),
             "checking_model": state.check_task is not None,
             "switching_model": state.switch_task is not None,
             "performance": state.performance.snapshot(),
         }
+
+    @app.get("/api/tasks", dependencies=[Depends(authenticate)])
+    async def task_status():
+        return state.tasks.status()
+
+    @app.post("/api/tasks/context", dependencies=[Depends(authenticate)])
+    async def task_context(snapshot: Snapshot):
+        if not snapshot.task_pool_supported: raise HTTPException(409, "Мод не поддерживает пул задач")
+        if state.command.mode != "stop" and time.monotonic() - state.last_seen < 3:
+            raise HTTPException(409, "Пул уже получает активные наблюдения")
+        if state.command.mode != "stop":
+            state.command = state.command.model_copy(update={"mode":"stop"})
+            state.revision += 1
+            state.cancel_inference()
+            state.tasks.pause("Активная связь потеряна; задачи сохранены на паузе")
+        state.tasks.bind(snapshot)
+        state.last_snapshot = snapshot
+        state.last_seen = time.monotonic()
+        state.snapshot_error = None
+        if snapshot.item_catalog:
+            state.item_catalog = snapshot.item_catalog; state.item_catalog_version = snapshot.item_catalog_version
+        return {"ok":True, "revision":state.revision}
+
+    @app.post("/api/tasks/control", dependencies=[Depends(authenticate)])
+    async def control_tasks(value: TaskControl):
+        snapshot = state.last_snapshot
+        if snapshot is None or not snapshot.task_pool_supported or time.monotonic() - state.last_seen >= CONNECTED_TIMEOUT:
+            raise HTTPException(409, "Сначала подключите NPC к этому миру")
+        if (value.world_id and value.world_id != snapshot.world_id) or (value.actor_id and value.actor_id != snapshot.actor.id):
+            raise HTTPException(409, "Это пул другого мира или NPC. Обновите список задач.")
+        if value.revision >= 0 and value.revision != state.tasks.pool.revision:
+            raise HTTPException(409, "Пул изменился. Обновите список задач и повторите действие.")
+        try: state.tasks.control(value.action, value.task_id, value.priority)
+        except (ValueError, KeyError): raise HTTPException(409, "Задача больше недоступна или действие недопустимо") from None
+        state.cancel_inference()
+        state.revision += 1
+        if value.action == "resume": state.command = state.command.model_copy(update={"mode":"ai"})
+        state.event("tasks", "Управление пулом: " + value.action)
+        return {"ok": True, "revision": state.revision}
 
     @app.get("/api/dialogue", dependencies=[Depends(authenticate)])
     async def dialogue_index():
@@ -577,6 +632,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.cancel_inference()
         state.planner.reset()
         state.command = Command(mode="stop", objective=state.command.objective)
+        state.tasks.pause("Провайдер изменён; задачи сохранены на паузе")
         async def prepare():
             if previous: await asyncio.gather(*previous, return_exceptions=True)
             if revision != state.revision: return
@@ -630,6 +686,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         state.cancel_inference()
         state.planner.reset()
         state.next_ai_request = 0
+        if state.last_snapshot is not None and state.last_snapshot.task_pool_supported:
+            state.tasks.stop(value.pause_tasks) if value.mode == "stop" else state.tasks.command(value.mode, value.objective)
         state.feedback_times.clear()
         state.event("operator", {"stop": "Стоп", "follow": "Следовать за лидером", "ai": value.objective}[value.mode])
         if value.mode == "ai": state.feedback("Приступаю к поручению. Готовлю план действий.")
@@ -662,6 +720,10 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
                 state.next_ai_request = 0
                 state.feedback_times.clear()
                 state.feedback("Принял обращение. Готовлю ответ или действия.")
+                if state.last_snapshot is not None and state.last_snapshot.task_pool_supported:
+                    state.tasks.request(value.text, ({**line, "pending":True},))
+                    state.pending_chat.clear()
+                    state.explicit_chat_mission = None; state.explicit_chat_id = 0
             return {"handled": False, "queued": True, "mode": "ignore", "objective": "", "reply": ""}
         if not state.ready or state.chat_busy or state.chat_suspended or state.check_task is not None or state.switch_task is not None:
             return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
@@ -712,6 +774,10 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     @app.post("/api/decision", dependencies=[Depends(authenticate)])
     async def decision(snapshot: Snapshot):
         now = time.monotonic()
+        new_session = state.session_id != snapshot.session_id
+        different_scope = state.last_snapshot is not None and (state.last_snapshot.actor.id, state.last_snapshot.world_id) != (snapshot.actor.id, snapshot.world_id)
+        if different_scope and state.session_id and now - state.last_seen < 30:
+            raise HTTPException(409, "Мост уже обслуживает другого персонажа или мир")
         if state.session_id != snapshot.session_id:
             same_actor = state.last_snapshot is not None and state.last_snapshot.actor.id == snapshot.actor.id
             if state.session_id and not same_actor and now - state.last_seen < 30:
@@ -722,6 +788,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             state.cancel_chat()
             state.chat_history.clear()
             state.planner.reset()
+            state.tasks.pause("Сеанс управления изменён; задачи сохранены на паузе")
             # A reconnected/new character always starts stopped.
             state.command = Command(mode="stop", objective=state.command.objective)
         if snapshot.sequence <= state.last_sequence:
@@ -746,6 +813,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         elif snapshot.item_catalog_version == state.item_catalog_version:
             snapshot = snapshot.model_copy(update={"item_catalog": state.item_catalog})
         state.last_snapshot = snapshot
+        if snapshot.task_pool_supported:
+            state.tasks.bind(snapshot)
+            if new_session: state.tasks.pause("Новый сеанс; задачи ожидают команды игрока")
         state.snapshot_error = None
         revision = state.revision
         mode = state.command.mode
@@ -754,6 +824,15 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         api_attempted = False
         api_error = None
         result = wait()
+        if snapshot.task_pool_supported and mode in ("ai", "follow"):
+            if state.pending_chat and state.tasks.task is None:
+                state.tasks.accept_pending_chat(snapshot)
+            result, source, plan_id = state.tasks.decision(snapshot)
+            result = validate_decision(result, snapshot)
+            return DecisionReply(**result.model_dump(), sequence=snapshot.sequence, source=source,
+                command_revision=state.revision, plan_id=plan_id, mode=state.command.mode,
+                avoid_combat=state.tasks.pool.combat_policy == "avoid",
+                item_catalog_version=state.item_catalog_version if snapshot.item_catalog_version == state.item_catalog_version else "")
         if mode == "ai" and snapshot.background_planning:
             result, source, plan_id = state.planner.decision(snapshot)
             result = validate_decision(result, snapshot)

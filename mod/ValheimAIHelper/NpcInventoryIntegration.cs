@@ -21,7 +21,7 @@ public sealed partial class Plugin
         {
             if (NpcInventoryWindow.TryOpen(npc, () =>
             {
-                p.StopFromPanel();
+                p.PauseTasksFromPanel();
                 p.SetPanel(false);
                 if (Menu.instance) Menu.instance.Hide();
                 Game.Unpause();

@@ -76,6 +76,8 @@ namespace ValheimAIHelper;
 }
 [Serializable] public sealed class Snapshot
 {
+    public bool task_pool_supported;
+    public string world_id = "";
     public float ground_scan_radius = 20;
     public int ground_items_total;
     public bool ground_items_truncated;
@@ -92,6 +94,7 @@ namespace ValheimAIHelper;
     public string leader_id = "", previous_result = "";
     public string leader_name = "", leader_status = "", motor_state = "";
     public bool simulation_paused;
+    public bool reflex_active;
     public bool background_planning;
     public bool listen_chat = true;
     public string plan_id = "", action_status = "";

@@ -26,6 +26,26 @@ namespace ValheimAIHelper;
     [DataMember] public bool planning;
     [DataMember] public AiPerformance? performance;
     [DataMember] public BridgeEvent[] events = Array.Empty<BridgeEvent>();
+    [DataMember] public BridgeTaskPool? task_pool;
+}
+[DataContract] public sealed class BridgeTaskPool
+{
+    [DataMember] public int limit = 15, revision;
+    [DataMember] public bool paused;
+    [DataMember] public string active_id = "", world_id = "", actor_id = "", notice = "";
+    [DataMember] public BridgeTask[] tasks = Array.Empty<BridgeTask>(), history = Array.Empty<BridgeTask>();
+}
+[DataContract] public sealed class BridgeTask
+{
+    [DataMember] public string id = "", title = "", kind = "", status = "", reason = "", progress = "", target = "";
+    [DataMember] public int priority;
+    [DataMember] public string[] depends_on = Array.Empty<string>();
+}
+[DataContract] public sealed class TaskControlRequest
+{
+    [DataMember] public string action = "", task_id = "", world_id = "", actor_id = "";
+    [DataMember] public int priority;
+    [DataMember] public int revision = -1;
 }
 [DataContract] public sealed class AiPerformance
 {
@@ -51,6 +71,7 @@ namespace ValheimAIHelper;
 [DataContract] public sealed class BridgeCommand
 {
     [DataMember] public string mode = "stop", objective = "";
+    [DataMember] public bool pause_tasks;
 }
 [DataContract] public sealed class ModelListRequest { [DataMember] public string api_key = "", ollama_url = AiProviders.DefaultOllamaUrl; }
 [DataContract] public sealed class ModelListReply { [DataMember] public string[] models = Array.Empty<string>(); }

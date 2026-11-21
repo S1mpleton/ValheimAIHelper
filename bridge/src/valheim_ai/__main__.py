@@ -46,7 +46,7 @@ def main():
     print("In Valheim: Esc -> Character control (or F8).")
     print("Optional diagnostic dashboard port:", args.port)
     print("API keys entered in the game or dashboard remain in memory until shutdown.")
-    uvicorn.run(create_app(token=token), host="127.0.0.1", port=args.port, access_log=False,
+    uvicorn.run(create_app(token=token, data_dir=args.data_dir), host="127.0.0.1", port=args.port, access_log=False,
                 loop="asyncio", http="h11", ws="none")
 
 

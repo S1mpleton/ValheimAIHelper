@@ -65,6 +65,26 @@ if (args.Length > 1 && args[0] == "--ui-command")
     Console.WriteLine(WireJson.Serialize(new BridgeCommand { mode = args[1], objective = "Следуй за лидером" }));
     return 0;
 }
+if (args.Length > 3 && args[0] == "--ui-task-control")
+{
+    Console.WriteLine(WireJson.Serialize(new TaskControlRequest {
+        action = args[1], task_id = args[2], revision = int.Parse(args[3]),
+        world_id = "wire_world_8", actor_id = "player:-9223372036854775807",
+        priority = args.Length > 4 ? int.Parse(args[4]) : 0
+    }));
+    return 0;
+}
+if (args.Length > 1 && args[0] == "--read-task-status")
+{
+    var status = WireJson.Deserialize<BridgeUiStatus>(Console.In.ReadToEnd());
+    var pool = status.task_pool;
+    if (pool == null || pool.limit != 15 || pool.world_id != "wire_world_8" ||
+        pool.actor_id != "player:-9223372036854775807" || pool.paused != bool.Parse(args[1])) return 1;
+    if (pool.tasks.Length != 1 || pool.tasks[0].kind != "follow" || pool.tasks[0].id.Length == 0 ||
+        pool.tasks[0].title.Length == 0 || pool.tasks[0].progress == null) return 1;
+    Console.WriteLine("TASK_STATUS_OK:" + pool.tasks[0].priority);
+    return 0;
+}
 if (args.Length > 0 && args[0] == "--read-ui-status")
 {
     var status = WireJson.Deserialize<BridgeUiStatus>(Console.In.ReadToEnd());
@@ -103,6 +123,23 @@ var snapshot = new Snapshot
     entities = new[] { new Entity { id = "character:42", name = "Лидер", kind = "player", distance = 5,
         position = new Position { x = -1082.25f, y = 32.125f, z = 4799.5f } } }
 };
+if (args.Length > 0 && (args[0] == "--task-snapshot" || args[0] == "--task-reflex" || args[0] == "--check-task-response"))
+{
+    snapshot.session_id = "wire-tasks";
+    snapshot.task_pool_supported = true;
+    snapshot.reflex_active = args[0] == "--task-reflex";
+    snapshot.world_id = "wire_world_8";
+    snapshot.background_planning = true;
+    snapshot.supported_actions = Capabilities.NpcSupported(true);
+}
+if (args.Length > 2 && args[0] == "--check-task-response")
+{
+    var decision = WireJson.Deserialize<Decision>(Console.In.ReadToEnd());
+    if (!DecisionPolicy.Accept(decision, snapshot, false) || decision.action != args[2] ||
+        decision.source != "tasks" || string.IsNullOrEmpty(decision.plan_id)) return 1;
+    Console.WriteLine("TASK_ACCEPTED:" + decision.action);
+    return 0;
+}
 if (args.Length > 0 && args[0].Contains("extended"))
 {
     snapshot.session_id = "wire-extended";

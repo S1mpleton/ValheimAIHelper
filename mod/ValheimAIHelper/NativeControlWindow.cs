@@ -26,6 +26,17 @@ public sealed partial class Plugin
         private Component? dialogueHeader, dialogueBody, dialoguePageLabel, dialogueCopy, dialogueSave;
         private readonly List<Component> dialogueTabs = new();
         private readonly List<Component> modelButtons = new();
+        private readonly List<Component> taskButtons = new();
+        private Component? taskSummary, taskTitle, taskDetails, taskPageLabel, taskGlobalPause, taskHistoryButton;
+        private Component? taskPause, taskCancel, taskPriorityUp, taskPriorityDown, taskClear;
+        private Component? taskHudToggle;
+        private BridgeTaskPool? displayedTaskPool;
+        private int taskPage, displayedTaskPage = -1;
+        private bool taskHistory, displayedTaskHistory;
+        private string selectedTaskId = "", displayedTaskId = "";
+        private bool displayedTaskBusy;
+        private bool displayedTaskHud;
+        private string displayedTaskSummary = "";
         private int page, modelPage, logPage;
         private float nextRefresh;
         private bool built, additional;
@@ -195,12 +206,12 @@ public sealed partial class Plugin
             stateLabel = Label(frame.transform, "", 24, 65, 812, 26, 16);
             var strip = Box("Navigation tabs", frame.transform, 24, 102, 812, 48);
             Image(strip, new Color(.065f, .055f, .04f), false);
-            string[] names = { "Персонаж", "Подключение AI", "Журнал" };
+            string[] names = { "Персонаж", "Подключение AI", "Журнал", "Задачи" };
             for (int i = 0; i < names.Length; i++)
             {
                 int index = i;
-                tabs.Add(Button(strip.transform, names[i], i * 274, 4, 264, () => { page = index; p.uiDialogue = false; ShowPage(); }));
-                var marker = Box("Selected tab", strip.transform, i * 274, 44, 264, 3);
+                tabs.Add(Button(strip.transform, names[i], i * 205, 4, 197, () => { page = index; p.uiDialogue = false; ShowPage(); }));
+                var marker = Box("Selected tab", strip.transform, i * 205, 44, 197, 3);
                 Image(marker, new Color(.85f, .59f, .18f), false); tabMarkers.Add(marker);
                 pages.Add(Box("Tab " + i, frame.transform, 24, 166, 812, 382));
             }
@@ -298,6 +309,104 @@ public sealed partial class Plugin
             dialogueSave = Button(tab, "Сохранить всё", 509, 346, 145, () => p.StartCoroutine(p.ExportDialogue(true)));
             Button(tab, "Очистить", 668, 346, 144, () => p.StartCoroutine(p.ClearDialogue()));
         }
+        private void BuildTasks(Transform tab)
+        {
+            taskSummary = Label(tab, "", 0, 0, 478, 44, 15);
+            taskGlobalPause = Button(tab, "", 496, 0, 154, () =>
+                p.HandleTaskControl(p.CurrentTaskPool?.paused == true ? "resume" : "pause"));
+            taskClear = Button(tab, "Отменить все", 662, 0, 150, () => p.HandleTaskControl("clear"));
+            for (int i = 0; i < TaskPoolText.PageSize; i++)
+            {
+                int slot = i;
+                taskButtons.Add(Button(tab, "", 0, 52 + i * 41, 478, () =>
+                {
+                    var tasks = TaskPoolText.Entries(p.CurrentTaskPool, taskHistory);
+                    int index = taskPage * TaskPoolText.PageSize + slot;
+                    if (index < tasks.Length) { selectedTaskId = tasks[index].id; RefreshTasks(true); }
+                }));
+            }
+            var detail = Box("Selected task", tab, 496, 52, 316, 242);
+            Image(detail, new Color(.075f, .065f, .05f), false);
+            taskTitle = Label(detail.transform, "Выберите задачу", 12, 10, 292, 42, 17);
+            taskDetails = InputField(detail.transform, "", 8, 60, 300, 174, 4000, _ => { }, multiline: true);
+            Set(taskDetails, "readOnly", true); Set(taskDetails, "scrollSensitivity", 3f);
+            if (Get(taskDetails, "textComponent") is Component content) Set(content, "fontSize", 14f);
+            Button(tab, "‹", 0, 264, 64, () => MoveTaskPage(-1));
+            Button(tab, "›", 72, 264, 64, () => MoveTaskPage(1));
+            taskPageLabel = Label(tab, "", 150, 273, 120, 26, 16);
+            taskHistoryButton = Button(tab, "История", 284, 264, 194, () =>
+            { taskHistory = !taskHistory; taskPage = 0; selectedTaskId = ""; RefreshTasks(true); });
+            taskPause = Button(tab, "Пауза задачи", 0, 304, 252, () =>
+            {
+                var selected = TaskPoolText.Entries(p.CurrentTaskPool, taskHistory).FirstOrDefault(t => t.id == selectedTaskId);
+                if (selected != null) p.HandleTaskControl(selected.status == "paused" ? "resume" : "pause", selected.id);
+            });
+            taskCancel = Button(tab, "Отменить задачу", 268, 304, 252, () => p.HandleTaskControl("cancel", selectedTaskId));
+            taskPriorityDown = Button(tab, "Приоритет −", 536, 304, 134, () => ChangeTaskPriority(-10));
+            taskPriorityUp = Button(tab, "Приоритет +", 678, 304, 134, () => ChangeTaskPriority(10));
+            taskHudToggle = Button(tab, "", 0, 346, 284, () => { p.ToggleTaskHud(); RefreshTasks(true); });
+            Label(tab, "Поручения — в чате. Приоритет: 0–90.\nПодробности справа можно прокрутить мышью.", 300, 346, 512, 36, 14);
+        }
+        private void ChangeTaskPriority(int delta)
+        {
+            var selected = TaskPoolText.Entries(p.CurrentTaskPool, taskHistory).FirstOrDefault(t => t.id == selectedTaskId);
+            if (selected != null) p.HandleTaskControl("priority", selected.id, Math.Max(0, Math.Min(90, selected.priority + delta)));
+        }
+        private void MoveTaskPage(int delta)
+        {
+            var tasks = TaskPoolText.Entries(p.CurrentTaskPool, taskHistory);
+            taskPage = Math.Max(0, Math.Min(Math.Max(0, (tasks.Length - 1) / TaskPoolText.PageSize), taskPage + delta));
+            selectedTaskId = tasks.Skip(taskPage * TaskPoolText.PageSize).FirstOrDefault()?.id ?? "";
+            RefreshTasks(true);
+        }
+        private void RefreshTasks(bool force = false)
+        {
+            var pool = p.CurrentTaskPool;
+            bool busy = p.uiBusy || p.taskControlBusy;
+            string summary = pool == null ? p.TaskPoolUnavailableMessage : TaskPoolText.Summary(pool, taskHistory);
+            if (!force && ReferenceEquals(displayedTaskPool, pool) && displayedTaskPage == taskPage &&
+                displayedTaskHistory == taskHistory && displayedTaskId == selectedTaskId && displayedTaskBusy == busy && displayedTaskSummary == summary && displayedTaskHud == p.TaskHudEnabled) return;
+            var tasks = TaskPoolText.Entries(pool, taskHistory);
+            taskPage = Math.Min(taskPage, Math.Max(0, (tasks.Length - 1) / TaskPoolText.PageSize));
+            if (!tasks.Any(t => t.id == selectedTaskId))
+            {
+                selectedTaskId = (tasks.FirstOrDefault(t => t.id == pool?.active_id) ?? tasks.FirstOrDefault())?.id ?? "";
+                int selectedIndex = Array.FindIndex(tasks, t => t.id == selectedTaskId);
+                if (selectedIndex >= 0) taskPage = selectedIndex / TaskPoolText.PageSize;
+            }
+            displayedTaskPool = pool; displayedTaskPage = taskPage; displayedTaskHistory = taskHistory;
+            displayedTaskId = selectedTaskId; displayedTaskBusy = busy;
+            displayedTaskSummary = summary;
+            displayedTaskHud = p.TaskHudEnabled;
+            ButtonText(taskHudToggle, (p.TaskHudEnabled ? "✓ " : "") + "Показывать задачи справа");
+            Set(taskSummary!, "text", summary);
+            ButtonText(taskGlobalPause, pool?.paused == true ? "Продолжить всё" : "Общая пауза");
+            ButtonText(taskHistoryButton, taskHistory ? "Текущие задачи" : "История");
+            Set(taskGlobalPause!, "interactable", pool != null && !busy);
+            Set(taskClear!, "interactable", pool != null && !busy && TaskPoolText.Entries(pool, false).Length > 0);
+            Set(taskHistoryButton!, "interactable", !busy);
+            for (int i = 0; i < taskButtons.Count; i++)
+            {
+                int index = taskPage * TaskPoolText.PageSize + i;
+                bool available = index < tasks.Length;
+                if (taskButtons[i].gameObject.activeSelf != available) taskButtons[i].gameObject.SetActive(available);
+                if (!available) continue;
+                var task = tasks[index];
+                ButtonText(taskButtons[i], TaskPoolText.Row(task, task.id == pool?.active_id));
+                Set(taskButtons[i], "interactable", !busy);
+                Set(taskButtons[i].GetComponent(Type("UnityEngine.UI.Image")), "color",
+                    task.id == selectedTaskId ? new Color(.42f, .31f, .13f) : new Color(.16f, .13f, .09f));
+            }
+            var selected = tasks.FirstOrDefault(t => t.id == selectedTaskId);
+            Set(taskTitle!, "text", selected == null ? "Выберите задачу" : TaskPoolText.Short(selected.title, 100));
+            Set(taskDetails!, "text", TaskPoolText.Details(selected, pool));
+            Set(taskPageLabel!, "text", (taskPage + 1) + " / " + Math.Max(1, (tasks.Length + TaskPoolText.PageSize - 1) / TaskPoolText.PageSize));
+            bool actionable = !busy && !taskHistory && !TaskPoolText.Terminal(selected);
+            ButtonText(taskPause, selected?.status == "paused" ? "Продолжить задачу" : "Пауза задачи");
+            Set(taskPause!, "interactable", actionable); Set(taskCancel!, "interactable", actionable);
+            Set(taskPriorityDown!, "interactable", actionable && selected!.priority > 0);
+            Set(taskPriorityUp!, "interactable", actionable && selected!.priority < 90);
+        }
         private void ShowPage()
         {
             if (!builtPages.Contains(page))
@@ -305,6 +414,7 @@ public sealed partial class Plugin
                 var timer = System.Diagnostics.Stopwatch.StartNew();
                 if (page == 1) BuildConnection(pages[1].transform);
                 else if (page == 2) BuildJournal(pages[2].transform);
+                else if (page == 3) BuildTasks(pages[3].transform);
                 builtPages.Add(page);
                 p.AddLog("ui-time", "Вкладка " + page + ": " + timer.ElapsedMilliseconds + " мс");
             }
@@ -341,6 +451,7 @@ public sealed partial class Plugin
             foreach (var button in busyButtons) Set(button, "interactable", !p.uiBusy);
             if (page == 1) RefreshConnection();
             else if (page == 2) RefreshJournal();
+            else if (page == 3) RefreshTasks();
         }
         private void RefreshConnection()
         {
@@ -387,6 +498,7 @@ public sealed partial class Plugin
             if (root) UnityEngine.Object.Destroy(root);
             root = frame = characterMain = characterAdvanced = journalMain = dialoguePanel = null; canvas = null;
             pages.Clear(); builtPages.Clear(); busyButtons.Clear(); buttonCaptions.Clear(); modelButtons.Clear(); tabs.Clear(); tabMarkers.Clear(); dialogueTabs.Clear();
+            taskButtons.Clear(); displayedTaskPool = null; displayedTaskPage = -1;
         }
     }
 }

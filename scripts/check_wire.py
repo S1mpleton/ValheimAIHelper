@@ -175,6 +175,55 @@ async def main():
             assert subprocess.check_output(["dotnet",str(program),"--read-dialogue-page"],input=page.content,timeout=10).strip()==b"DIALOGUE_PAGE_OK"
             exported=await client.get(f"/api/dialogue/{id}/export")
             assert subprocess.check_output(["dotnet",str(program),"--read-dialogue-export"],input=exported.content,timeout=10).strip()==b"DIALOGUE_EXPORT_OK"
+    # The new task-capable native path is exercised separately from legacy
+    # snapshots. Every upstream call here fails: follow and UI controls are local.
+    def no_model(request):
+        raise AssertionError("Task scheduler unexpectedly requested a model: " + str(request.url))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(no_model)) as upstream:
+        app = create_app(token=token, client=upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Authorization": "Bearer " + token}) as client:
+            async def native_snapshot(sequence, reflex=False):
+                encoded = subprocess.check_output(["dotnet", str(program), "--task-reflex" if reflex else "--task-snapshot", str(sequence)], timeout=10)
+                body = json.loads(encoded)
+                assert body["task_pool_supported"] and body["world_id"] == "wire_world_8" and body["reflex_active"] is reflex
+                response = await client.post("/api/decision", content=encoded, headers={"Content-Type":"application/json"})
+                assert response.status_code == 200, response.text
+                return response
+            async def task_control(action, task_id="", priority=0, revision=None):
+                pool = (await client.get("/api/tasks")).json()
+                encoded = subprocess.check_output(["dotnet", str(program), "--ui-task-control", action, task_id,
+                                                   str(pool["revision"] if revision is None else revision), str(priority)], timeout=10)
+                response = await client.post("/api/tasks/control", content=encoded, headers={"Content-Type":"application/json"})
+                return response
+            async def read_status(paused, priority):
+                response = await client.get("/api/status")
+                decoded = subprocess.check_output(["dotnet", str(program), "--read-task-status", str(paused)], input=response.content, timeout=10)
+                assert decoded.strip() == ("TASK_STATUS_OK:" + str(priority)).encode()
+                return response.json()["task_pool"]
+            await native_snapshot(1)
+            assert (await client.post("/api/command", json={"mode":"follow"})).status_code == 200
+            following = await native_snapshot(2)
+            assert subprocess.check_output(["dotnet", str(program), "--check-task-response", "2", "follow"], input=following.content, timeout=10).strip() == b"TASK_ACCEPTED:follow"
+            pool = await read_status(False, 30)
+            task_id, lease = pool["tasks"][0]["id"], following.json()["plan_id"]
+            reflex = await native_snapshot(3, reflex=True)
+            assert reflex.json()["plan_id"] == lease and reflex.json()["action"] == "follow"
+            assert (await task_control("priority", task_id, priority=70)).status_code == 200
+            await read_status(False, 70)
+            # Old pool revisions must be rejected rather than silently editing.
+            assert (await task_control("cancel", task_id, revision=pool["revision"])).status_code == 409
+            assert (await task_control("pause")).status_code == 200
+            await read_status(True, 70)
+            paused = await native_snapshot(4)
+            assert paused.json()["action"] == "wait"
+            assert (await task_control("resume")).status_code == 200
+            resumed = await native_snapshot(5)
+            assert subprocess.check_output(["dotnet", str(program), "--check-task-response", "5", "follow"], input=resumed.content, timeout=10).strip() == b"TASK_ACCEPTED:follow"
+            await read_status(False, 70)
+            assert (await task_control("clear")).status_code == 200
+            cleared = (await client.get("/api/tasks")).json()
+            assert not cleared["tasks"] and cleared["history"][0]["status"] == "cancelled"
+        await app.state.bridge.tasks.close()
     print("PASS: actual C# wire serializer -> Python HTTP validation -> follow/mocked AI move -> C# decoder and policy")
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
     print("PASS: background plan -> destination/run/plan ID -> C# policy")
@@ -183,6 +232,7 @@ async def main():
     print("PASS: C# loaded ground stack (45m/count=7) -> local pickup plan; give exactly 5 from observed inventory to player -> C# validation")
     print("PASS: actual C# NPC snapshot/quest/item keys -> Ollama bulk give / exact 7 across 5+3 stacks -> C# policy")
     print("PASS: actual model request/raw reply/validation dialogue -> paged Python endpoints -> C# index/page/export DTOs")
+    print("PASS: actual C# task snapshots/control/status DTOs -> local follow/reflex lease/priority/pause/resume/cancel; zero model calls")
 
 
 if __name__ == "__main__":

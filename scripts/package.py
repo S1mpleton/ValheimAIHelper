@@ -43,9 +43,13 @@ def main():
                          "No API key needed for Ollama. Thinking is disabled (think=false). Models are not bundled.\r\n"
                          "Leader chat: address the NPC by name, e.g. Gosha, pick up stones.\r\n"
                          "NPC inventory: approach and press E, or Character -> NPC inventory. No AI needed.\r\n"
-                         "Opening the bag stops the NPC; enable Follow / AI again after closing.\r\n"
+                         "Opening the bag pauses the task pool. Close it, then Tasks -> Resume all.\r\n"
+                         "Tasks: up to 15 active tasks with priorities, dependencies and game-confirmed progress.\r\n"
+                         "Character control -> Tasks: pause, resume, cancel, priority, history.\r\n"
+                         "Toggle Show tasks on the right in Tasks; the choice is saved.\r\n"
+                         "Saved world/NPC task pools restore paused; resume them explicitly.\r\n"
                          "Only the exact Russian follow command is immediate; paraphrases are interpreted by AI.\r\n"
-                         "F9 stops the NPC. No second client/account required. See docs/npc.md.\r\n")
+                         "F9 cancels all tasks. No second client/account required. See docs/task-scheduler.md.\r\n")
     checksum = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".zip.sha256").write_text(f"{checksum}  {output.name}\n", encoding="ascii")
     print(output)

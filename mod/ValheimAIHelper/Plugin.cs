@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.7.4")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.8.0")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -84,6 +84,7 @@ public sealed partial class Plugin : BaseUnityPlugin
         if (Input.GetKeyDown(KeyCode.F8)) { if (showPanel) SetPanel(false); else OpenPanelFromMenu(); }
         if (showPanel && Input.GetKeyDown(KeyCode.Escape)) SetPanel(false);
         UpdatePanel();
+        UpdateTaskContext();
         UpdateRuntime();
         NpcInventoryWindow.Update();
         if (active && (!actor || !CompanionNpc.Is(actor) || actor == Player.m_localPlayer || !actor!.IsOwner() || actor.IsDead() || !Player.m_localPlayer))
@@ -217,6 +218,9 @@ public sealed partial class Plugin : BaseUnityPlugin
                 observation.Data.motor_state = executor.MotorState;
                 observation.Data.leader_name = ObservationValues.Text(resolvedLeaderName.Length > 0 ? resolvedLeaderName : leaderName.Value, 120);
                 observation.Data.background_planning = true;
+                observation.Data.task_pool_supported = true;
+                observation.Data.reflex_active = executor.ReflexActive;
+                observation.Data.world_id = ZNet.instance.GetWorldUID().ToString(System.Globalization.CultureInfo.InvariantCulture);
                 observation.Data.simulation_paused = Time.timeScale < .01f;
                 observation.Data.listen_chat = allowChat.Value;
                 observation.Data.plan_id = executor.PlanId;
@@ -307,6 +311,7 @@ public sealed partial class Plugin : BaseUnityPlugin
 
     private void OnGUI()
     {
+        DrawTaskHud();
         if (!showPanel) return;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;

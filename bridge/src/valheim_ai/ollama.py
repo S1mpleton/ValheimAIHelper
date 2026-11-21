@@ -141,16 +141,16 @@ class ModelSession:
         async with self.lock:
             await self._select(client, base, model)
 
-    async def generate(self, client, base, model, messages, schema, statistics, trace=None):
+    async def generate(self, client, base, model, messages, schema, statistics, trace=None, num_predict=2048):
         async with self.lock:
             await self._select(client, base, model)
-            return await generate(client, base, model, messages, schema, statistics=statistics, trace=trace)
+            return await generate(client, base, model, messages, schema, statistics=statistics, trace=trace, num_predict=num_predict)
 
 
-async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict, *, statistics=None, trace=None) -> str:
+async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict, *, statistics=None, trace=None, num_predict=2048) -> str:
     info = await model_info(client, base, model)
     payload = {"model": model, "messages": messages, "format": schema, "stream": False,
-               "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 16384, "num_predict": 2048}}
+               "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 16384, "num_predict": num_predict}}
     payload["think"] = thinking_option(info)
     if trace is not None: trace.set("request", payload)
     data = await request(client, base, "POST", "/api/chat", payload=payload, timeout=OLLAMA_DECISION_TIMEOUT - 15)

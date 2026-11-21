@@ -42,7 +42,7 @@ def main():
                     except OSError:
                         if time.monotonic() > deadline: raise
                         time.sleep(.2)
-                assert health["version"] == "0.7.4", health
+                assert health["version"] == "0.8.0", health
                 req = urllib.request.Request(base + "/api/status", headers={"Authorization": "Bearer " + token})
                 with opener.open(req) as r: status = json.load(r)
                 assert status["mode"] == "stop" and not status["keys_present"]["openai"]
@@ -90,10 +90,40 @@ def main():
                         assert '"steps"' in get(f"/api/dialogue/{id}?part=response")["text"]
                         assert "Valheim AI Helper" in get(f"/api/dialogue/{id}/export")["text"]
                         assert post("/api/dialogue/clear",{})["ok"] and not get("/api/dialogue")["entries"]
+                        # Exercise the bundled task modules and native task path
+                        # without another model call. The follower is deterministic.
+                        observed = {"protocol_version":1,"session_id":"frozen-tasks","sequence":1,
+                            "task_pool_supported":True,"world_id":"frozen_world","reflex_active":False,
+                            "supported_actions":["wait","follow"],"leader_id":"leader",
+                            "actor":{"id":"player:npc","name":"Гоша","position":{"x":0,"y":0,"z":0},
+                                     "health":25,"max_health":25,"stamina":50,"inventory":[]},
+                            "entities":[{"id":"leader","name":"Лидер","kind":"player","distance":5,
+                                         "position":{"x":5,"y":0,"z":0}}]}
+                        assert post("/api/tasks/context",observed)["ok"]
+                        assert post("/api/decision",observed)["action"] == "wait"
+                        assert post("/api/command",{"mode":"follow"})["ok"]
+                        observed["sequence"] += 1
+                        follow = post("/api/decision",observed)
+                        assert follow["action"] == "follow" and follow["source"] == "tasks" and follow["plan_id"]
+                        pool = get("/api/tasks")
+                        task_id = pool["tasks"][0]["id"]
+                        assert pool["limit"] == 15 and pool["world_id"] == "frozen_world"
+                        assert post("/api/command",{"mode":"stop","pause_tasks":True})["ok"]
+                        pool = get("/api/tasks")
+                        assert pool["paused"] and pool["tasks"][0]["id"] == task_id
+                        assert post("/api/tasks/control",{"action":"resume","revision":pool["revision"],
+                            "world_id":"frozen_world","actor_id":"player:npc"})["ok"]
+                        observed["sequence"] += 1
+                        assert post("/api/decision",observed)["action"] == "follow"
+                        assert post("/api/command",{"mode":"stop"})["ok"]
+                        assert not get("/api/tasks")["tasks"]
+                        assert list((data / "task-pools").glob("*.json")), "Task pool was not persisted"
+                        assert requests==["/api/ps","/api/tags","/api/show","/api/chat"], requests
                     finally:
                         server.shutdown();worker.join(timeout=3)
                 print("PASS: frozen runtime starts without Python/source in cwd; HTTP/auth/static/status/ordinary-chat")
                 print("PASS: bundled Ollama adapter -> local HTTP models/show/chat -> validated JSON plan, no key, think=false")
+                print("PASS: bundled task scheduler -> context/follow/pause/preserve/resume/stop/persistence, zero extra model calls")
             finally:
                 if child.poll() is None: child.terminate()
                 child.wait(timeout=10)

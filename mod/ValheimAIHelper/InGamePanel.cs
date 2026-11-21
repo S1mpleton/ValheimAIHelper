@@ -29,6 +29,7 @@ public sealed partial class Plugin
 
     private void InitPanel()
     {
+        InitTaskHud();
         savedProvider = Config.Bind("AI", "Provider", "openai", "AI provider. API keys are never saved here.");
         savedModel = Config.Bind("AI", "Model", "", "API model name selected in the game panel.");
         savedOllamaUrl = Config.Bind("AI", "OllamaUrl", AiProviders.DefaultOllamaUrl, "Local Ollama HTTP URL on this PC. No API key is required.");
@@ -155,7 +156,7 @@ public sealed partial class Plugin
     private void SelectProvider(string provider)
     {
         if (uiProvider == provider) return;
-        StopFromPanel();
+        PauseTasksFromPanel();
         uiProvider = provider; uiModel = uiKey = ""; uiModels = Array.Empty<string>();
         uiMessage = provider == "ollama" ? "Запустите Ollama и получите список установленных моделей. API-ключ не нужен." : "Выберите модель и сохраните подключение.";
     }
@@ -227,7 +228,7 @@ public sealed partial class Plugin
         try
         {
             if (uiClient == null) { uiError = "Служба AI не подключена."; yield break; }
-            if (mode == "ai")
+            if (mode == "ai" && !(uiObjective == CompanionObjective && CurrentTaskPool?.tasks?.Length > 0))
             {
                 bool saved = false;
                 yield return SaveAiSettings(operation, () => saved = true);
@@ -265,6 +266,12 @@ public sealed partial class Plugin
     }
 
     private void StopFromPanel()
+    { StopControlFromPanel(false); }
+
+    private void PauseTasksFromPanel()
+    { StopControlFromPanel(true); }
+
+    private void StopControlFromPanel(bool preserveTasks)
     {
         ++uiOperation;
         chatQueue.Clear();
@@ -272,16 +279,16 @@ public sealed partial class Plugin
         uiClient?.Dispose();
         CreateUiClient();
         uiBusy = true; uiError = ""; uiMessage = "Помощник остановлен.";
-        StartCoroutine(PostStop());
+        StartCoroutine(PostStop(preserveTasks));
     }
 
-    private IEnumerator PostStop()
+    private IEnumerator PostStop(bool preserveTasks)
     {
         int operation = uiOperation;
         try
         {
             if (uiClient != null)
-                yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = "stop", objective = uiObjective }, _ => { }, _ => { }, 5);
+                yield return uiClient.Request<BridgeOk>("/api/command", new BridgeCommand { mode = "stop", objective = uiObjective, pause_tasks = preserveTasks }, _ => { }, _ => { }, 5);
         }
         finally { if (operation == uiOperation) uiBusy = false; }
     }
@@ -345,11 +352,13 @@ public sealed partial class Plugin
         if (uiError.Length > 0) GUILayout.Label(uiError, panelErrorStyle);
         else if (uiMessage.Length > 0) GUILayout.Label(uiMessage, statusStyle);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button((!uiSettings && !uiJournal ? "● " : "") + "Персонаж", panelButtonStyle)) { uiSettings = uiJournal = uiDialogue = false; }
-        if (GUILayout.Button((uiSettings ? "● " : "") + "Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = uiDialogue = false; }
-        if (GUILayout.Button((uiJournal ? "● " : "") + "Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = uiDialogue = false; }
+        if (GUILayout.Button((!uiSettings && !uiJournal && !uiTaskPool ? "● " : "") + "Персонаж", panelButtonStyle)) { uiSettings = uiJournal = uiDialogue = uiTaskPool = false; }
+        if (GUILayout.Button((uiSettings ? "● " : "") + "Подключение AI", panelButtonStyle)) { uiSettings = true; uiJournal = uiDialogue = uiTaskPool = false; }
+        if (GUILayout.Button((uiTaskPool ? "● " : "") + "Задачи", panelButtonStyle)) { uiTaskPool = true; uiSettings = uiJournal = uiDialogue = false; }
+        if (GUILayout.Button((uiJournal ? "● " : "") + "Журнал", panelButtonStyle)) { uiJournal = true; uiSettings = uiDialogue = uiTaskPool = false; }
         GUILayout.EndHorizontal();
-        if (uiJournal && uiDialogue) DrawDialogue();
+        if (uiTaskPool) DrawTaskPool();
+        else if (uiJournal && uiDialogue) DrawDialogue();
         else if (uiJournal)
         {
             if (GUILayout.Button("Диалог AI — запросы и ответы", panelButtonStyle)) { uiDialogue = true; nextDialoguePoll = 0; }

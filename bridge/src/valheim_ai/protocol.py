@@ -144,6 +144,9 @@ class BuildOption(StrictModel):
 
 
 class Snapshot(StrictModel):
+    task_pool_supported: bool = False
+    reflex_active: bool = False
+    world_id: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9_-]*$")
     protocol_version: int = Field(default=1, ge=1, le=1)
     session_id: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
     sequence: int = Field(ge=1)

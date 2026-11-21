@@ -38,6 +38,8 @@ internal sealed class BridgeUiClient : IDisposable
                     ModelListRequest m => WireJson.Serialize(m),
                     ModelCheckRequest c => WireJson.Serialize(c),
                     LeaderChatRequest c => WireJson.Serialize(c),
+                    TaskControlRequest c => WireJson.Serialize(c),
+                    Snapshot s => WireJson.Serialize(s),
                     BridgeEmpty empty => WireJson.Serialize(empty),
                     _ => throw new ArgumentException("Unsupported bridge request")
                 };
