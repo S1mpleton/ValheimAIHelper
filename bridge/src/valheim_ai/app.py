@@ -26,6 +26,7 @@ from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
 from .task_runtime import TaskRuntime
+from .chat_intent import classify_chat
 from .task_policy import companion_duty
 
 
@@ -77,6 +78,7 @@ class ChatRequest(StrictModel):
     speaker: str = Field(max_length=120)
     text: str = Field(min_length=1, max_length=1000)
     explicit_address: bool = False
+    direct_dialogue: bool = False
 
 
 class State:
@@ -677,49 +679,52 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise HTTPException(409, reason)
         if value.mode == "ai" and not state.ready:
             raise HTTPException(409, "Сначала выберите провайдера и добавьте API-ключ")
-        state.command = value
+        deferred = (state.last_snapshot is not None and state.last_snapshot.task_pool_supported
+                    and value.mode == "ai" and state.command.mode in ("ai", "follow") and not companion_duty(value.objective))
+        state.command = value.model_copy(update={"mode":state.command.mode}) if deferred else value
         if value.mode == "stop": state.provider_error = None
-        state.revision += 1
+        if not deferred: state.revision += 1
         state.cancel_chat()
         state.cancel_check()
         state.cancel_switch()
-        state.cancel_inference()
+        if not deferred: state.cancel_inference()
         state.planner.reset()
         state.next_ai_request = 0
         if state.last_snapshot is not None and state.last_snapshot.task_pool_supported:
             state.tasks.stop(value.pause_tasks) if value.mode == "stop" else state.tasks.command(value.mode, value.objective)
         state.feedback_times.clear()
         state.event("operator", {"stop": "Стоп", "follow": "Следовать за лидером", "ai": value.objective}[value.mode])
-        if value.mode == "ai": state.feedback("Приступаю к поручению. Готовлю план действий.")
+        if value.mode == "ai": state.feedback("Принял запрос. Продолжаю прежнюю работу, пока готовлю новое поручение." if deferred else "Приступаю к поручению. Готовлю план действий.")
         return {"ok": True, "revision": state.revision}
 
     @app.post("/api/chat", dependencies=[Depends(authenticate)])
     async def leader_chat(value: ChatRequest):
         if not state.chat_listening:
             return {"handled": False, "queued": False, "mode": "ignore", "objective": "", "reply": ""}
-        if state.command.mode == "ai" and any(m["speaker"] == value.speaker and m["text"] == value.text and m["explicit_address"] == value.explicit_address for m in state.pending_chat):
+        task_chat = state.last_snapshot is not None and state.last_snapshot.task_pool_supported and state.command.mode in ("ai", "follow")
+        if (state.command.mode == "ai" or task_chat) and any(m["speaker"] == value.speaker and m["text"] == value.text and m["explicit_address"] == value.explicit_address for m in state.pending_chat):
             return {"handled": False, "queued": True, "mode": "ignore", "objective": "", "reply": ""}
         state.chat_id += 1
-        line = {"id": state.chat_id, "speaker": value.speaker, "text": value.text, "explicit_address": value.explicit_address}
+        line = {"id": state.chat_id, "speaker": value.speaker, "text": value.text, "explicit_address": value.explicit_address, "direct_dialogue": value.direct_dialogue}
         state.chat_history.append(line)
         state.event("leader-chat", value.speaker + ": " + value.text)
-        if state.command.mode == "ai":
-            if value.explicit_address: state.pending_chat.clear()
+        if state.command.mode == "ai" or task_chat:
+            if value.explicit_address or value.direct_dialogue: state.pending_chat.clear()
             state.pending_chat.append(line)
-            if value.explicit_address:
+            if value.explicit_address or value.direct_dialogue:
                 # Addressing by name is already verified by the mod. Do not
                 # depend on a tiny model recognizing that it is being addressed.
                 if state.explicit_chat_mission is None: state.explicit_chat_mission = state.command.objective
                 state.explicit_chat_id = line["id"]
                 state.item_intents.clear()
                 state.command = state.command.model_copy(update={"objective": value.text})
-                state.revision += 1
+                if not task_chat: state.revision += 1
                 policy = state.planner.combat_policy
                 state.planner.reset()
                 state.planner.combat_policy = policy
                 state.next_ai_request = 0
                 state.feedback_times.clear()
-                state.feedback("Принял обращение. Готовлю ответ или действия.")
+                state.feedback("Принял обращение. Пока продолжаю прежнюю работу." if task_chat else "Принял обращение. Готовлю ответ или действия.")
                 if state.last_snapshot is not None and state.last_snapshot.task_pool_supported:
                     state.tasks.request(value.text, ({**line, "pending":True},))
                     state.pending_chat.clear()
@@ -742,6 +747,9 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             async def classify():
                 if delay > 0: await asyncio.sleep(delay)
                 state.next_ai_request = time.monotonic() + state.request_interval_seconds
+                if probe.task_pool_supported:
+                    intent = await classify_chat(state, probe, tuple({**m,"pending":m["id"]==line["id"]} for m in state.chat_history))
+                    return Plan(steps=[wait()], chat_intent=intent)
                 return await state.decide(
                     "Классифицируй обращение к помощнику по контексту. Текущий режим: " + state.command.mode +
                     "; задача: " + state.command.objective + ". Не управляй персонажем: steps=[wait].", probe,

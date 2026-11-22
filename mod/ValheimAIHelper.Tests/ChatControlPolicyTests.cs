@@ -4,6 +4,13 @@ using Xunit;
 public class ChatControlPolicyTests
 {
     [Theory]
+    [InlineData(true,1,true)]
+    [InlineData(true,2,false)]
+    [InlineData(true,0,false)]
+    [InlineData(false,1,false)]
+    public void PrivateNpcDialogueRequiresTheAuthoritativeSingleHumanRoster(bool host,int humans,bool expected)
+    { Assert.Equal(expected,ChatControlPolicy.PrivateDialogue(host,humans)); }
+    [Theory]
     [InlineData(false,10,10,100,100,true)]
     [InlineData(false,10,20,200,200,false)]
     [InlineData(false,10,10,100,200,false)]

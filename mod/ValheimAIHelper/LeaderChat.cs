@@ -33,8 +33,20 @@ public sealed partial class Plugin
         var view = speaker.GetComponent<ZNetView>();
         while (chatQueue.Count >= 6) chatQueue.Dequeue();
         chatQueue.Enqueue(new LeaderChatRequest { actor_name = CurrentNpc ? CurrentNpc!.GetPlayerName() : npcName.Value, speaker = speaker.GetPlayerName(),
-            text = text, explicit_address = explicitAddress, SenderPlayerId = speaker.GetPlayerID(), SenderOwner = view.GetZDO().GetOwner() });
+            text = text, explicit_address = explicitAddress, direct_dialogue = PrivateNpcConversation(), SenderPlayerId = speaker.GetPlayerID(), SenderOwner = view.GetZDO().GetOwner() });
         if (!processingChat) StartCoroutine(ProcessOrdinaryChat());
+    }
+    private static bool PrivateNpcConversation()
+    {
+        if (!ZNet.instance || !ZNet.instance.IsServer()) return false;
+        try
+        {
+            // The server roster counts real human peers, including unloaded
+            // remote players. The companion is not a connected human peer.
+            var humans = NativeMethods.Call(ZNet.instance, "GetPlayerList") as ICollection;
+            return humans != null && ChatControlPolicy.PrivateDialogue(true, humans.Count);
+        }
+        catch { return false; }
     }
     private void FollowChatSpeaker(Player speaker)
     {
@@ -87,7 +99,7 @@ public sealed partial class Plugin
         { plugin.autoSurvival.Value = normalized == "еда вкл"; plugin.ChatReply(plugin.autoSurvival.Value ? "Автоматическая еда включена." : "Автоматическая еда выключена."); return; }
         if (plugin.uiBusy) { plugin.ChatReply("Выполняется настройка AI. Повторите команду через несколько секунд; стоп доступен всегда."); return; }
         string mode = LeaderCommand.IsDirectFollow(normalized) ? "follow" : "ai";
-        if (mode == "ai" && plugin.active && plugin.requestedMode == "ai" && plugin.CanInferChat)
+        if (mode == "ai" && plugin.active && (plugin.requestedMode == "ai" || plugin.requestedMode == "follow") && plugin.CanInferChat)
         {
             plugin.QueueChat(speaker, text, true);
             return;

@@ -115,7 +115,7 @@ namespace ValheimAIHelper;
 [DataContract] public sealed class LeaderChatRequest
 {
     [DataMember] public string actor_name = "", speaker = "", text = "";
-    [DataMember] public bool explicit_address;
+    [DataMember] public bool explicit_address, direct_dialogue;
     // Client-only authorization context, never provider-supplied or serialized.
     internal long SenderPlayerId = 0, SenderOwner = 0;
 }

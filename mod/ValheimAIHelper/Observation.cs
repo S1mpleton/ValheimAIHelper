@@ -19,6 +19,10 @@ internal sealed class Observation
     public readonly Dictionary<string, Piece> Pieces = new();
     private static readonly Collider[] hits = new Collider[768];
     private static readonly System.Reflection.FieldInfo? dropInstances = AccessTools.Field(typeof(ItemDrop), "s_instances");
+    private static Component[] loadedPickables = Array.Empty<Component>();
+    private static ItemDrop[] loadedDropFallback = Array.Empty<ItemDrop>();
+    private static float nextPickableScan;
+    private static long pickableWorld;
     private static readonly Dictionary<string, string> categories = new()
     {
         ["Pickable"]="pickable", ["PickableItem"]="pickable", ["Door"]="door", ["Container"]="container",
@@ -26,7 +30,49 @@ internal sealed class Observation
         ["Fermenter"]="fermenter", ["Fireplace"]="fire", ["Beehive"]="beehive", ["Bed"]="bed",
         ["Chair"]="chair", ["ItemStand"]="item_stand", ["ArmorStand"]="item_stand", ["Switch"]="station_input"
     };
-    internal static IEnumerable<ItemDrop> LoadedDrops() => dropInstances?.GetValue(null) as IEnumerable<ItemDrop> ?? UnityEngine.Object.FindObjectsOfType<ItemDrop>();
+    internal static IEnumerable<ItemDrop> LoadedDrops()
+    {
+        RefreshGroundCache();
+        var registered = dropInstances?.GetValue(null) as IEnumerable<ItemDrop>;
+        return registered == null ? loadedDropFallback : registered.Concat(loadedDropFallback).Distinct();
+    }
+    private static void RefreshGroundCache()
+    {
+        long world = ZNet.instance ? ZNet.instance.GetWorldUID() : 0;
+        if (world != pickableWorld || Time.realtimeSinceStartup >= nextPickableScan)
+        {
+            // Generated E-pickups are not ItemDrop instances and may have no
+            // collider in the short interaction query. Cache a loaded-object
+            // scan instead of tying visibility to collider size or frame rate.
+            loadedPickables = UnityEngine.Object.FindObjectsOfType<Pickable>().Cast<Component>()
+                .Concat(UnityEngine.Object.FindObjectsOfType<PickableItem>()).ToArray();
+            // Registry layout/lifecycle can differ between supported game
+            // versions. Include real active scene drops even when the registry
+            // exists but has not registered them; never scan prefab assets.
+            loadedDropFallback = UnityEngine.Object.FindObjectsOfType<ItemDrop>();
+            pickableWorld = world; nextPickableScan = Time.realtimeSinceStartup + 2;
+        }
+    }
+    private static IEnumerable<Component> LoadedPickables() { RefreshGroundCache(); return loadedPickables; }
+    private static bool AvailableDrop(ItemDrop drop)
+    {
+        if (!drop || !drop.gameObject.activeInHierarchy || drop.m_itemData == null || drop.m_itemData.m_stack <= 0) return false;
+        // Attached item visuals may retain an ItemDrop component. They are not
+        // loose inventory stock and must never be passed to Player.Pickup.
+        if (drop.GetComponentInParent<Character>() || drop.GetComponentInParent<Pickable>() || drop.GetComponentInParent<PickableItem>()) return false;
+        if (drop.GetComponentsInParent<Component>(true).Any(c=>c && (c.GetType().Name=="ItemStand" || c.GetType().Name=="ArmorStand"))) return false;
+        // Use the view actually owned by ItemDrop. A visual on a corpse or
+        // another networked object must not borrow that parent's ZNetView.
+        var view = NativeAccess.Read(drop,"m_nview") as ZNetView ?? drop.GetComponent<ZNetView>();
+        return view && view.IsValid();
+    }
+    private static bool AvailablePickable(Component component)
+    {
+        if (!component || !component.gameObject.activeInHierarchy || NativeAccess.Read(component, "m_picked") is true ||
+            NativeAccess.Read(component, "m_enabled") is int enabled && enabled == 0) return false;
+        var view = NativeAccess.Read(component,"m_nview") as ZNetView ?? component.GetComponent<ZNetView>();
+        return view && view.IsValid() && ItemCatalog.ProducedItem(component);
+    }
     internal static string Id(Character c) => "character:" + c.GetInstanceID();
     internal static string WorldId(Component c) => "world:" + c.GetInstanceID();
     internal static string ItemId(ItemDrop.ItemData item, bool container = false) => (container ? "container-item:" : "inventory:") + RuntimeHelpers.GetHashCode(item);
@@ -110,23 +156,43 @@ internal sealed class Observation
         var nearby=hits.Take(count).Where(c=>c).ToArray();
         // Use the game's loaded ItemDrop registry, not the short collider query
         // for interactions: small drops and drops beyond 20m were disappearing.
-        var drops = LoadedDrops().Where(d=>d && d.gameObject.activeInHierarchy && d.m_itemData!=null && d.m_itemData.m_stack>0)
-            .Where(d=>d.GetComponent<ZNetView>() is ZNetView view && view.IsValid() && Vector3.Distance(origin,d.transform.position)<=128)
+        var drops = LoadedDrops().Where(AvailableDrop)
+            .Where(d=>Vector3.Distance(origin,d.transform.position)<=CollectiblePolicy.Radius)
             .Distinct().OrderBy(d=>Vector3.SqrMagnitude(origin-d.transform.position)).ToArray();
-        o.Data.ground_scan_radius=128;o.Data.ground_items_total=drops.Length;o.Data.ground_items_truncated=drops.Length>80;
-        foreach(var d in drops.Take(80))
+        var ground = new List<Entity>();
+        o.Data.ground_scan_radius=CollectiblePolicy.Radius;o.Data.ground_items_total=drops.Length;
+        foreach(var d in drops)
         {
             string id="drop:"+d.GetInstanceID();o.Drops[id]=d;
-            entities.Add(new Entity {id=id,name=Name(d.m_itemData.m_shared.m_name),kind="item",interaction="pickup",category=d.m_itemData.m_shared.m_itemType.ToString(),
+            bool allowed = d.CanPickup(false);
+            ground.Add(new Entity {id=id,name=Name(d.m_itemData.m_shared.m_name),kind="item",interaction="pickup",category=d.m_itemData.m_shared.m_itemType.ToString(),
                 item_prefab=ItemCatalog.Prefab(d.m_itemData),item_token=ObservationValues.Text(d.m_itemData.m_shared.m_name,160),
                 position=Pos(d.transform.position),distance=Vector3.Distance(origin,d.transform.position),count=Mathf.Clamp(d.m_itemData.m_stack,1,100000),
-                weight=ObservationValues.Vital(d.m_itemData.GetWeight()),pickup_allowed=d.CanPickup(false),state=d.CanPickup(false)?"Выпавший предмет":"Подбор временно недоступен игре"});
+                weight=ObservationValues.Vital(d.m_itemData.GetWeight()),pickup_allowed=allowed,state=allowed?"Выпавший предмет":"Подбор временно недоступен игре"});
         }
+        foreach(var c in LoadedPickables().Where(AvailablePickable).Where(c=>Vector3.Distance(origin,c.transform.position)<=CollectiblePolicy.Radius))
+        {
+            string[] produces = ItemCatalog.Produces(c);
+            if (produces.Length == 0) continue;
+            var item = ItemCatalog.ProducedItem(c)!.m_itemData;
+            if (item?.m_shared == null) continue;
+            string id = WorldId(c);o.Interactables[id]=c;
+            string name = Name(item.m_shared.m_name);
+            if (name.Length == 0) name = produces[0];
+            int amount = NativeAccess.Read(c, "m_amount", "m_stack") is int configured ? Mathf.Clamp(configured,1,100000) : 1;
+            ground.Add(new Entity {id=id,name=name,kind="interactable",interaction="interact",category="pickable",
+                item_prefab=produces[0],item_token=ObservationValues.Text(item.m_shared.m_name,160),produces=produces,
+                count=amount,position=Pos(c.transform.position),distance=Vector3.Distance(origin,c.transform.position),
+                state="Собираемый предмет: подойти и нажать E"});
+        }
+        var selectedGround = CollectiblePolicy.Select(ground,Math.Min(CollectiblePolicy.Limit,Math.Max(0,128-entities.Count-24)));
+        entities.AddRange(selectedGround);
+        o.Data.ground_items_truncated=drops.Length>selectedGround.Count(e=>e.kind=="item");
         var parents=nearby.SelectMany(c=>c.GetComponentsInParent<Component>(true)).Where(c=>c).Distinct().ToArray();
         var switches=parents.Where(c=>new[]{"Smelter","CookingStation","Fermenter"}.Contains(c.GetType().Name))
             .SelectMany(c=>c.GetComponentsInChildren<Component>(true)).Where(c=>c && c.GetType().Name=="Switch");
         var objects=parents.Concat(switches).Distinct().ToArray();
-        foreach(var c in objects.Where(c=>categories.ContainsKey(c.GetType().Name) && c is Interactable)
+        foreach(var c in objects.Where(c=>categories.ContainsKey(c.GetType().Name) && c is Interactable && !(c is Pickable) && !(c is PickableItem))
             .Where(c=>Vector3.Distance(origin,c.transform.position)<=20 && !(NativeAccess.Read(c,"m_picked") is true))
             .OrderBy(c=>Vector3.SqrMagnitude(origin-c.transform.position)).Take(16))
         {

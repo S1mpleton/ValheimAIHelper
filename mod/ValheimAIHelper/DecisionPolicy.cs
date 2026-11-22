@@ -49,7 +49,7 @@ public static class DecisionPolicy
             case "unequip": return item?.equipable == true;
             case "drop": return TransferPolicy.Available(s.actor.inventory, d.target_id, d.selection, d.amount);
             case "use": return item?.usable == true;
-            case "interact": return entity?.kind == "interactable" && InRange(s.actor.position, entity);
+            case "interact": return entity?.kind == "interactable" && InRange(s.actor.position, entity, CollectiblePolicy.IsPickupInteraction(entity) ? CollectiblePolicy.Radius : 20);
             case "use_on": return entity?.kind == "interactable" && InRange(s.actor.position, entity) && s.actor.inventory.Any(i => i.id == d.item_id && i.count >= d.amount);
             case "open": case "stack": return entity?.category == "container" && InRange(s.actor.position, entity);
             case "take": case "deposit":

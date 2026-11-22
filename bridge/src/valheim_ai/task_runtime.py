@@ -8,8 +8,9 @@ import time
 from .protocol import Action, Plan, Decision, validate_decision, wait
 from .providers import ProviderError, ProviderInvalidAction, ProviderUnavailable, ProviderRateLimited, ProviderModelNotFound, ProviderLocalConfigurationError
 from .task_policy import companion_duty
-from .task_pool import TaskPool, TaskSpec
+from .task_pool import MUTATING, TaskPool, TaskSpec
 from .task_compiler import compile_tasks
+from .chat_intent import classify_chat
 
 
 class TaskRuntime:
@@ -22,7 +23,7 @@ class TaskRuntime:
         self.task = None
         self.epoch = 0
         self.pending = None
-        self.resume_after_compile = False
+        self.pending_batch = None
         self.next_retry = 0.
         self.attempts = 0
         self.notice = ""
@@ -31,12 +32,14 @@ class TaskRuntime:
         self.last_saved = None
         self.save_at = 0.
 
-    def cancel_generation(self, clear_request=True):
+    def cancel_generation(self, clear_request=True, keep_steps=False):
         self.epoch += 1
         if self.task is not None and self.task is not asyncio.current_task(): self.task.cancel()
         self.task = None
-        if clear_request: self.pending = None
-        self.goal_steps.clear()
+        if clear_request:
+            self.pending = None
+            self.pending_batch = None
+        if not keep_steps: self.goal_steps.clear()
 
     async def close(self):
         task = self.task
@@ -60,6 +63,7 @@ class TaskRuntime:
                 try:
                     self.pool = TaskPool.load(self.path, identity)
                     self.notice = "Сохранённые задачи загружены на паузе. Нажмите «Продолжить»."
+                    if self.pool.migration_note: self.notice += " " + self.pool.migration_note
                 except (ValueError, OSError):
                     self.notice = "Не удалось прочитать сохранённый пул; автоматический запуск заблокирован."
                     self.pool.control("pause")
@@ -77,7 +81,7 @@ class TaskRuntime:
             self.state.feedback(self.notice, key="task-save", interval=60)
 
     def status(self):
-        return {**self.pool.status(), "notice": self.notice, "compiling": self.task is not None,
+        return {**self.pool.status(), "notice": self.notice, "compiling": self.task is not None or self.pending is not None,
                 "world_id": self.world[0] if self.world else "", "actor_id": self.world[1] if self.world else ""}
 
     def pause(self, reason="Задачи приостановлены"):
@@ -93,28 +97,30 @@ class TaskRuntime:
         self.save(force=True)
 
     def command(self, mode, objective):
+        if mode != "follow" and (not companion_duty(objective) or not self.pool.tasks):
+            self.request(objective)
+            self.save(force=True)
+            return
         self.cancel_generation()
+        self.pool.interrupt("Получена немедленная команда управления")
         self.notice = ""
         if mode == "follow":
-            self.pool.apply_batch([TaskSpec(kind="follow", title="Следовать за лидером", priority=30)], "append", self.state.last_snapshot, source_request=objective)
+            # This is the operator's immediate/manual follow command, not an
+            # AI plan. It uses the neutral default rather than a type ranking.
+            self.pool.apply_batch([TaskSpec(kind="follow", title="Следовать за лидером")], "append", self.state.last_snapshot, source_request=objective)
             self.pool.unpause()
             self.state.feedback("Следую за лидером.", key="tasks-follow")
         elif companion_duty(objective):
-            if not self.pool.tasks:
-                self.pool.apply_batch([TaskSpec(kind="follow", title="Следовать и помогать выжить", priority=30)], "append", self.state.last_snapshot)
             self.pool.unpause()
-        else:
-            self.request(objective)
         self.save(force=True)
 
     def request(self, objective, chat=()):
-        resume = self.resume_after_compile if self.pending else not self.pool.paused
-        self.cancel_generation()
-        self.pool.control("pause")
-        self.resume_after_compile = resume
+        # Enqueuing an interpretation is not an execution change. Keep the
+        # current native lease, receipts and already planned steps intact.
+        self.cancel_generation(keep_steps=True)
         self.pending = (objective, tuple(chat))
         self.attempts = 0; self.next_retry = 0
-        self.notice = "Разбираю поручение на задачи…"
+        self.notice = "Разбираю новое поручение; прежние задачи продолжаются…"
 
     def control(self, action, task_id="", priority=None):
         if task_id and self.pool.get(task_id) is None: raise ValueError("Task not found")
@@ -136,12 +142,10 @@ class TaskRuntime:
         chat = tuple({**m,"pending":m["id"] in pending} for m in state.chat_history)
         try:
             if not pending: return
-            result = await asyncio.wait_for(state.decide("Определи, обращается ли разрешённый игрок к NPC. Текущая задача: " + state.command.objective + ". Не выполняй действия: steps=[wait].", snapshot,
-                planning=True, purpose="chat", chat=chat), state.decision_timeout)
+            intent = await asyncio.wait_for(classify_chat(state, snapshot, chat), state.decision_timeout)
             if (epoch, revision) != (self.epoch, state.revision) or not state.chat_listening: return
             pending.intersection_update(m["id"] for m in state.pending_chat)
             if not pending: return
-            intent = result.chat_intent
             if intent is None or intent.message_id not in pending:
                 # A classification without an identified line cannot consume
                 # other requests queued while the model was working.
@@ -155,7 +159,7 @@ class TaskRuntime:
                 self.command("follow", ""); state.command = state.command.model_copy(update={"mode":"follow"}); state.revision += 1
             elif intent.mode == "task":
                 objective = next(m["text"] for m in chat if m["id"] == intent.message_id)
-                state.command = state.command.model_copy(update={"mode":"ai", "objective":objective}); state.revision += 1
+                state.command = state.command.model_copy(update={"objective":objective})
                 self.request(objective, chat)
             elif intent.reply:
                 state.feedback(intent.reply, key="task-chat-reply-" + str(intent.message_id), interval=0)
@@ -174,35 +178,88 @@ class TaskRuntime:
         objective, chat = self.pending
         try:
             batch = await asyncio.wait_for(compile_tasks(state, objective, snapshot, chat), state.decision_timeout)
-            if (epoch, world, revision) != (self.epoch, self.world, state.revision) or state.command.mode != "ai": return
-            self.pool.apply_batch(batch.tasks, batch.mode, snapshot, source_request=objective)
-            self.pool.combat_policy = batch.combat_policy
-            self.pool.unpause()
-            self.pending = None; self.notice = ""
-            state.event("tasks", "Принят план: " + " → ".join(t.title or t.objective or t.kind for t in batch.tasks))
-            state.feedback("Принял задач: " + str(len(batch.tasks)) + ". Приступаю к выполнению.", key="tasks-accepted-" + str(epoch), interval=0)
-            self.save(force=True)
+            if (epoch, world, revision) != (self.epoch, self.world, state.revision) or state.command.mode not in ("ai", "follow"): return
+            # Apply against the next observation, after the previous action's
+            # acknowledgement. A slow model must not interrupt a bag mutation.
+            self.pending_batch = (batch, objective, epoch, world, revision)
+            self.notice = "Новое поручение разобрано; ожидаю завершения текущего действия…"
         except asyncio.CancelledError:
             raise
         except (ProviderError, TimeoutError, ValueError) as exc:
-            if (epoch, world, revision) != (self.epoch, self.world, state.revision): return
-            self.attempts += 1
-            message = str(exc) if isinstance(exc, ProviderError) or type(exc) is ValueError else "Время разбора задач истекло" if isinstance(exc, TimeoutError) else "План задач не прошёл проверку"
-            self.notice = message[:240]
-            state.event("tasks", self.notice)
-            state.feedback("Не могу принять план: " + self.notice, key="tasks-compile-error-" + str(epoch))
-            if isinstance(exc, (ProviderRateLimited, ProviderModelNotFound, ProviderLocalConfigurationError)):
-                self.pending = None
-                state.provider_error = {"provider":state.provider,"model":state.model,"message":message,"detail":exc.diagnostic}
-                state.command = state.command.model_copy(update={"mode":"stop"}); state.revision += 1
-            elif self.attempts < 3 and isinstance(exc, (ProviderUnavailable, TimeoutError)):
-                self.next_retry = time.monotonic() + 15
-            else:
-                self.pending = None
-                if self.resume_after_compile: self.pool.unpause()
-            self.save(force=True)
+            self._compile_error(exc, epoch, world, revision)
         finally:
             if self.task is asyncio.current_task(): self.task = None
+
+    def _compile_error(self, exc, epoch, world, revision):
+        state = self.state
+        if (epoch, world, revision) != (self.epoch, self.world, state.revision): return
+        self.pending_batch = None
+        self.attempts += 1
+        message = str(exc) if isinstance(exc, ProviderError) or type(exc) is ValueError else "Время разбора задач истекло" if isinstance(exc, TimeoutError) else "План задач не прошёл проверку"
+        self.notice = message[:240]
+        state.event("tasks", self.notice)
+        state.feedback("Не могу принять новое поручение: " + self.notice + ". Прежние задачи сохранены.", key="tasks-compile-error-" + str(epoch))
+        if isinstance(exc, (ProviderRateLimited, ProviderModelNotFound, ProviderLocalConfigurationError)):
+            self.pending = None
+            state.provider_error = {"provider":state.provider,"model":state.model,"message":message,"detail":exc.diagnostic}
+        elif self.attempts < 3 and isinstance(exc, (ProviderUnavailable, TimeoutError)):
+            self.next_retry = time.monotonic() + 15
+        else:
+            self.pending = None
+        self.save(force=True)
+
+    def _commit_batch(self, snapshot):
+        if self.pending_batch is None: return
+        batch, objective, epoch, world, revision = self.pending_batch
+        state = self.state
+        if (epoch, world, revision) != (self.epoch, self.world, state.revision) or state.command.mode not in ("ai", "follow"):
+            self.pending_batch = None
+            self.pending = None
+            return
+        if snapshot.simulation_paused or self.pool.lease is not None and self.pool.lease.action in MUTATING:
+            return
+        def effective_tasks():
+            result = {}
+            for node in self.pool.tasks:
+                ignored = {"title"}
+                if node.kind != "goal": ignored.add("objective")
+                if node.kind == "collect" and node.spec.continuous: ignored.update(("amount", "selection"))
+                value = node.spec.model_dump(exclude=ignored)
+                value["item_prefabs"] = sorted(value["item_prefabs"])
+                result[node.id] = value
+            return self.pool.combat_policy, result
+        previous = effective_tasks()
+        previous_sources = {node.id:node.source_request for node in self.pool.tasks}
+        try:
+            accepted = self.pool.apply_batch(batch, snapshot=snapshot, source_request=objective)
+        except ValueError as exc:
+            self._compile_error(exc, epoch, world, revision)
+            return
+        if not batch.edits and not self.pool.paused and previous == effective_tasks():
+            # Repeating the same standing orders is not new work. In particular,
+            # a weak model copying its old plan must not restart the motor or
+            # be reported as accepting fifteen newly generated jobs.
+            for node in self.pool.tasks: node.source_request = previous_sources.get(node.id, node.source_request)
+            self.pending = self.pending_batch = None
+            self.notice = "План уже активен; модель не предложила изменений. Прежняя работа продолжается."
+            state.event("tasks", self.notice)
+            state.feedback(self.notice, key="tasks-unchanged-" + str(epoch), interval=0)
+            self.save(force=True)
+            return
+        # Validation and all edits are transactional. Only an accepted change
+        # may advance native command identity and invalidate the previous lease.
+        self.pool.interrupt("Принято новое поручение")
+        self.pool.unpause()
+        state.command = state.command.model_copy(update={"mode":"ai", "objective":objective})
+        state.revision += 1
+        self.pending = self.pending_batch = None
+        self.notice = ""
+        self.goal_steps = {task_id: steps for task_id, steps in self.goal_steps.items() if self.pool.get(task_id) is not None}
+        edits = getattr(batch, "edits", ())
+        titles = " → ".join(node.title for node in accepted)
+        state.event("tasks", "Обновлён пул: " + (titles or "изменены существующие задачи") + ("; изменений: " + str(len(edits)) if edits else ""))
+        state.feedback("Принято задач: " + str(len(accepted)) + ("; изменений: " + str(len(edits)) if edits else "") + ". Приступаю к выполнению.", key="tasks-accepted-" + str(epoch), interval=0)
+        self.save(force=True)
 
     async def _plan_goal(self, node, snapshot):
         state = self.state
@@ -247,10 +304,12 @@ class TaskRuntime:
     def decision(self, snapshot):
         self.bind(snapshot)
         now = time.monotonic()
-        if self.pending and self.task is None and now >= max(self.next_retry, self.state.retry_after) and self.state.ready and not snapshot.simulation_paused:
+        self.pool.observe(snapshot, now)
+        self._commit_batch(snapshot)
+        if self.pending and self.pending_batch is None and self.task is None and now >= max(self.next_retry, self.state.retry_after) and self.state.ready and not snapshot.simulation_paused:
             self.task = asyncio.create_task(self._compile(snapshot))
         # Native reflexes retain priority100; pause task clocks while defending.
-        decision, plan_id, node = self.pool.next_decision(snapshot)
+        decision, plan_id, node = self.pool.next_decision(snapshot, now)
         self._feedback()
         if decision is None and node is not None:
             steps = self.goal_steps.get(node.id)

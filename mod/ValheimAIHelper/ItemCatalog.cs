@@ -68,22 +68,33 @@ internal static class ItemCatalog
 
     internal static string Prefab(ItemDrop.ItemData item)
     {
-        if (item.m_dropPrefab) return item.m_dropPrefab.name;
+        if (item.m_dropPrefab) return ItemCatalogPolicy.PrefabName(item.m_dropPrefab.name);
         return item.m_shared != null && sharedPrefabs.TryGetValue(item.m_shared, out var id) ? id : "";
+    }
+
+    internal static ItemDrop? ProducedItem(Component observed)
+    {
+        if (observed is Pickable plant && plant.m_itemPrefab) return plant.m_itemPrefab.GetComponent<ItemDrop>();
+        if (observed is PickableItem pickable)
+        {
+            if (pickable.m_itemPrefab) return pickable.m_itemPrefab;
+            // Only the already selected visual instance is examined. A random
+            // prefab table is not a list of items actually present in the world.
+            if (NativeAccess.Read(pickable, "m_instance") is GameObject visual && visual)
+                return visual.GetComponent<ItemDrop>() ?? visual.GetComponentInChildren<ItemDrop>();
+        }
+        return null;
     }
 
     internal static string[] Produces(Component observed)
     {
         // Only the already observed plant/pickable's declared output is read.
         // Random tables are not rolled and unobserved objects are not inspected.
-        if (observed is Pickable plant && plant.m_itemPrefab)
-        {
-            var item = plant.m_itemPrefab.GetComponent<ItemDrop>();
-            return item && item.m_itemData != null ? new[] { plant.m_itemPrefab.name } : Array.Empty<string>();
-        }
-        if (observed is PickableItem pickable && pickable.m_itemPrefab)
-            return new[] { pickable.m_itemPrefab.gameObject.name };
-        return Array.Empty<string>();
+        var item = ProducedItem(observed);
+        if (!item || item!.m_itemData == null) return Array.Empty<string>();
+        string prefab = Prefab(item.m_itemData);
+        if (prefab.Length == 0) prefab = ItemCatalogPolicy.PrefabName(item.gameObject.name);
+        return prefab.Length > 0 ? new[] { prefab } : Array.Empty<string>();
     }
 
     private static void Export()

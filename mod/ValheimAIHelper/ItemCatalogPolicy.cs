@@ -7,6 +7,12 @@ namespace ValheimAIHelper;
 public static class ItemCatalogPolicy
 {
     public const int SnapshotLimit = 4096;
+    public static string PrefabName(string? value)
+    {
+        string name = value ?? "";
+        while (name.EndsWith("(Clone)", StringComparison.Ordinal)) name = name.Substring(0, name.Length - 7);
+        return name;
+    }
     // Prefab identity stays case-sensitive, as it is in Valheim. Equal display
     // names/localization tokens do not mean two prefabs are the same item type.
     public static ItemCatalogEntry[] Normalize(IEnumerable<ItemCatalogEntry> entries) => entries

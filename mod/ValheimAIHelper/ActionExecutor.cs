@@ -40,7 +40,7 @@ internal sealed partial class ActionExecutor
         observation = from;
         expires = Time.realtimeSinceStartup + value.duration;
         if (same && !((value.action == "follow" || value.action == "wait") && ActionStatus == "blocked" && (Time.time - blockedAt >= 8 || terminalOutcome == "Нет свежих данных от службы; управление приостановлено"))) { decision = value; return; } // Renew policy/flags while preserving execution state.
-        ResetExtended(value); CompletedAmount = 0; terminalOutcome = ""; navigationGate.Reset(); follow.Reset();
+        ResetExtended(value); ResetCollectible(); CompletedAmount = 0; terminalOutcome = ""; navigationGate.Reset(); follow.Reset();
         decision = value;
         PlanId = value.plan_id ?? "";
         ActionStatus = "running";
@@ -58,7 +58,7 @@ internal sealed partial class ActionExecutor
         validControl = false; ReflexActive = false; MotorState = "stopped"; terminalOutcome = ""; navigationGate.Reset(); follow.Reset();
         decision = null; observation = null; PlanId = ""; ActionStatus = ""; CompletedAmount = 0;
         inventorySession.Close(); placementPulse = false;
-        transfer = null;
+        transfer = null; ResetCollectible();
         path.Clear(); bowStarted = 0; usedItem = null;
         Result = reason; Input = default;
     }
@@ -158,22 +158,15 @@ internal sealed partial class ActionExecutor
                 PickupItem(player);
                 return;
             case "interact":
+                if (collectibleReceipt.Issued) { CheckCollectible(player); return; }
                 if (!observation.Interactables.TryGetValue(id, out var target) || !target) { Finish("Объект недоступен", false); return; }
-                if (Vector3.Distance(player.transform.position, target.transform.position) > 2) MoveTo(player, target.transform.position, 1.5f);
+                if (Vector3.Distance(player.transform.position, target.transform.position) > 2)
+                    MoveTo(player, target.transform.position, 1.5f, maxDistance: target is Pickable || target is PickableItem ? CollectiblePolicy.Radius : 20);
                 else
                 {
                     if (target is Pickable || target is PickableItem)
                     {
-                        // Pickable.Interact returns whether to animate, NOT
-                        // whether harvest succeeded. Check the game change.
-                        var position = target.transform.position;
-                        var before = new HashSet<int>(Observation.LoadedDrops().Where(d => d).Select(d => d.GetInstanceID()));
-                        int amount = player.GetInventory().GetAllItems().Sum(i => i.m_stack);
-                        ((Interactable)target).Interact(player, false, false);
-                        bool bagChanged = player.GetInventory().GetAllItems().Sum(i => i.m_stack) > amount;
-                        bool spawned = Observation.LoadedDrops().Any(d => d && !before.Contains(d.GetInstanceID()) && Vector3.Distance(d.transform.position, position) <= 3);
-                        bool harvested = !target || NativeAccess.Read(target, "m_picked") is true;
-                        Finish(harvested || spawned || bagChanged ? bagChanged ? "Сбор подтверждён: инвентарь пополнился" : "Растение собрано; появившиеся вещи подбираются действием pickup" : "Игра ещё не подтвердила сбор растения", harvested || spawned || bagChanged);
+                        Collect(player,target);
                         return;
                     }
                     bool ok;

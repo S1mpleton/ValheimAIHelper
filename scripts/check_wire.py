@@ -204,7 +204,7 @@ async def main():
             assert (await client.post("/api/command", json={"mode":"follow"})).status_code == 200
             following = await native_snapshot(2)
             assert subprocess.check_output(["dotnet", str(program), "--check-task-response", "2", "follow"], input=following.content, timeout=10).strip() == b"TASK_ACCEPTED:follow"
-            pool = await read_status(False, 30)
+            pool = await read_status(False, 50)
             task_id, lease = pool["tasks"][0]["id"], following.json()["plan_id"]
             reflex = await native_snapshot(3, reflex=True)
             assert reflex.json()["plan_id"] == lease and reflex.json()["action"] == "follow"

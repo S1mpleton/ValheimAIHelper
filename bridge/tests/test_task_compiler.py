@@ -39,73 +39,74 @@ def task_properties(schema, kind="follow"):
     return next(branch["properties"] for branch in spec["anyOf"] if branch["properties"]["kind"]["const"] == kind)
 
 
+def model_task(schema, kind, index=0, **fields):
+    task = dict(kind=kind, item_prefabs=[], amount=1, selection="exact",
+                continuous=kind == "follow", near_leader=False, objective="", priority=30 if kind == "follow" else 60 if kind == "collect" else 75)
+    if "id" in task_properties(schema): task["id"] = task_properties(schema)["id"]["enum"][index]
+    task.update(fields)
+    return task
+
+
 def model_batch(schema):
-    ids = task_properties(schema)["id"]["enum"]
     return {"mode": "append", "tasks": [
-        {"id": ids[0], "kind": "follow", "title": "Следовать", "priority": 30, "continuous": True},
-        {"id": ids[1], "kind": "collect", "title": "Малина по пути", "item_prefabs": ["Raspberry"],
-         "priority": 60, "continuous": True, "near_leader": True, "max_distance": 8},
+        model_task(schema, "follow"),
+        model_task(schema, "collect", index=1, item_prefabs=["Raspberry"], continuous=True, near_leader=True),
     ]}
 
 
-def test_request_has_bounded_type_dictionary_observed_facts_and_existing_dependencies(snapshot):
+def test_request_exposes_observed_types_and_editable_jobs_as_data(snapshot):
     observed = world(snapshot)
-    existing = [TaskSpec(id="earlier", kind="collect", item_prefabs=["Stone"], amount=5)]
+    existing = [TaskSpec(id="earlier", kind="collect", item_prefabs=["Stone"], amount=5, priority=23)]
     request = task_request("Пошли и собирай малину по дороге", observed, existing_tasks=existing, batch_id="test", combat_policy="avoid")
     payload = json.loads(request["messages"][-1]["content"])
     assert payload["latest_request"] == "Пошли и собирай малину по дороге"
     assert payload["current_combat_policy"] == "avoid"
-    assert payload["existing_task_ids"] == ["earlier"]
-    assert len(payload["new_task_ids"]) == 15
-    assert "AxeStone" in {i["item_prefab"] for i in payload["item_type_catalog"]}
-    assert "AxeStone" not in {e["item_prefab"] for e in payload["observed_entities"]}
+    assert payload["existing_tasks"][0]["id"] == "earlier"
+    assert payload["existing_tasks"][0]["priority"] == 23
+    assert "Raspberry" in {i["item_prefab"] for i in payload["item_type_catalog"]}
+    assert "AxeStone" not in {i["item_prefab"] for i in payload["item_type_catalog"]}
     assert request["format"]["properties"]["tasks"]["maxItems"] == 15
-    allowed = task_properties(request["format"])["depends_on"]["items"]["enum"]
-    assert "earlier" in allowed and request["new_task_ids"][0] in allowed
+    assert request["format"]["$defs"]["TaskEdit"]["properties"]["task_id"]["enum"] == ["earlier"]
 
 
-def test_ollama_grammar_prevents_nested_actions_in_typed_tasks_and_long_action_leases(snapshot):
-    request = task_request("Следуй за мной и собирай малину", world(snapshot))
-    schema = request["format"]
-    spec = schema["$defs"]["TaskSpec"]
-    assert "properties" not in spec  # Full variants must drive Ollama's grammar.
-    for branch in spec["anyOf"]:
-        props = branch["properties"]
-        kind = props["kind"]["const"]
-        assert branch["additionalProperties"] is False
-        assert set(branch["required"]) == set(props)
-        assert ("action" in props) == (kind == "action")
-        assert ("objective" in props) == (kind == "goal")
-        if kind == "collect":
-            assert props["item_prefabs"]["minItems"] == 1
-            assert props["selection"]["const"] != "all_inventory"
-        if kind == "goal": assert props["objective"]["minLength"] == 1
-    assert not {"follow", "pickup", "give", "drop"}.intersection(schema["$defs"]["Action"]["enum"])
-    assert schema["$defs"]["Decision"]["properties"]["duration"]["const"] == 1
+@pytest.mark.parametrize("provider", ["ollama", "openai", "gemini"])
+def test_full_planner_has_required_model_priority_and_optional_native_ids(snapshot, provider):
+    request = task_request("Собери камни, затем сделай инструмент", world(snapshot), provider=provider)
+    spec = request["format"]["$defs"]["TaskSpec"]
+    props = spec["properties"]
+    assert {"kind", "priority", "depends_on", "action", "objective", "item_prefabs"}.issubset(props)
+    assert "priority" in spec["required"]
+    if provider == "ollama": assert "id" not in spec["required"]
+    assert spec["additionalProperties"] is False
+    assert {"follow", "collect", "give", "drop", "action", "goal"} == set(props["kind"]["enum"])
+    raw = {"tasks":[{"kind":"collect", "item_prefabs":["Stone"], "priority":19}]}
+    assert parse_tasks(raw, world(snapshot), require_priority=True).tasks[0].priority == 19
+    raw["tasks"][0].pop("priority")
+    with pytest.raises(ProviderInvalidAction, match="приоритет"):
+        parse_tasks(raw, world(snapshot), require_priority=True)
 
 
-def test_ollama_whole_bag_branch_requires_empty_selector_and_unit_amount(snapshot):
-    schema = task_request("Отдай все вещи", world(snapshot))["format"]
-    branches = schema["$defs"]["TaskSpec"]["anyOf"]
-    whole_bag = [b["properties"] for b in branches if b["properties"].get("selection", {}).get("const") == "all_inventory"]
-    assert {p["kind"]["const"] for p in whole_bag} == {"give", "drop"}
-    for props in whole_bag:
-        assert props["item_prefabs"]["maxItems"] == 0
-        assert props["amount"]["const"] == 1
-
-
-def test_format_examples_use_current_ids_and_compile_to_only_requested_work(snapshot):
+def test_whole_bag_is_validated_after_compact_semantic_output(snapshot):
     observed = world(snapshot)
-    request = task_request("Пример", observed, batch_id="example")
+    valid = {"tasks": [{"kind":"give", "item_prefabs":[], "amount":1, "selection":"all_inventory"}]}
+    assert parse_tasks(valid, observed).tasks[0].selection == "all_inventory"
+    for changes in ({"amount":5}, {"item_prefabs":["Stone"]}):
+        with pytest.raises(ValueError): parse_tasks({"tasks":[{**valid["tasks"][0], **changes}]}, observed)
+
+
+def test_live_request_contains_no_copyable_demo_or_old_mission_title(snapshot):
+    observed = world(snapshot)
+    existing = [TaskSpec(id="saved_job_1234567890", kind="collect", title="Малина по пути", item_prefabs=["Raspberry"], continuous=True)]
+    request = task_request("Возьми каменный топор", observed, existing_tasks=existing)
     messages = request["messages"]
-    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user", "assistant", "user"]
-    assert json.loads(messages[-1]["content"])["latest_request"] == "Пример"
-    batches = [parse_tasks(json.loads(m["content"]), observed) for m in messages if m["role"] == "assistant"]
-    assert all(t.id not in request["new_task_ids"] for batch in batches for t in batch.tasks)
-    assert [t.kind for t in batches[0].tasks] == ["follow", "collect"]
-    assert batches[0].tasks[1].item_prefabs == ["Raspberry"] and batches[0].tasks[1].near_leader
-    assert [t.kind for t in batches[1].tasks] == ["give"]
-    assert batches[1].tasks[0].item_prefabs == ["Stone"] and batches[1].tasks[0].amount == 5
+    assert [m["role"] for m in messages] == ["system", "user"]
+    facts = json.loads(messages[-1]["content"])
+    assert facts["latest_request"] == "Возьми каменный топор"
+    assert "Малина по пути" not in json.dumps(messages, ensure_ascii=False)
+    assert facts["existing_tasks"][0]["id"] == existing[0].id
+    assert all("title" not in row for row in facts["existing_tasks"])
+    assert all("count" not in item and "id" not in item for item in facts["item_type_catalog"])
+    assert "format_examples_not_additional_requests" not in facts
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
@@ -116,12 +117,13 @@ def test_cloud_strict_schema_keeps_flat_required_object(provider, snapshot):
     assert spec["additionalProperties"] is False
 
 
-def test_empty_catalog_does_not_offer_item_collection_without_identified_types(snapshot):
+def test_empty_catalog_requires_clarification_instead_of_unknown_collection(snapshot):
     observed = Snapshot.model_validate({**snapshot, "leader_id": "", "entities": [], "actor": {**snapshot["actor"], "inventory": []}})
     request = task_request("Подбери неясный предмет", observed)
-    branches = request["format"]["$defs"]["TaskSpec"]["anyOf"]
-    assert not any(b["properties"]["kind"]["const"] == "collect" for b in branches)
-    assert all(b["properties"]["selection"]["const"] == "all_inventory" for b in branches if b["properties"]["kind"]["const"] in ("give", "drop"))
+    props = task_properties(request["format"])
+    assert props["item_prefabs"]["maxItems"] == 0
+    with pytest.raises(ValueError): parse_tasks({"tasks":[{"kind":"collect", "item_prefabs":[]}]}, observed)
+    with pytest.raises(ValueError): parse_tasks({"tasks":[{"kind":"collect", "item_prefabs":["Fake"]}]}, observed)
     assert len(request["messages"]) == 2
 
 
@@ -155,12 +157,10 @@ def test_continuous_collection_along_leader_path_runs_parallel_to_endless_follow
          "continuous": True, "near_leader": True, "depends_on": ["follow"]},
     ]}
     batch = parse_tasks(raw, observed)
-    assert batch.tasks[1].depends_on == []
-    assert raw["tasks"][1]["depends_on"] == ["follow"]  # Input stays unchanged.
-    pool = TaskPool()
-    pool.apply_batch(batch, snapshot=observed)
-    decision, _, node = pool.next_decision(observed)
-    assert decision.action == "pickup" and node.kind == "collect"
+    assert batch.tasks[1].depends_on == ["follow"]
+    assert raw["tasks"][1]["depends_on"] == ["follow"]
+    with pytest.raises(ValueError, match="continuous"):
+        TaskPool().apply_batch(batch, snapshot=observed)
 
 
 def test_existing_continuous_follow_is_not_a_prerequisite_for_along_path_gathering(snapshot):
@@ -168,7 +168,7 @@ def test_existing_continuous_follow_is_not_a_prerequisite_for_along_path_gatheri
     following = TaskSpec(id="existing_follow", kind="follow")
     batch = parse_tasks({"tasks": [{"kind": "collect", "item_prefabs": ["Raspberry"], "continuous": True,
         "near_leader": True, "depends_on": [following.id]}]}, observed, existing_tasks=[following])
-    assert batch.tasks[0].depends_on == []
+    assert batch.tasks[0].depends_on == [following.id]
 
 
 @pytest.mark.parametrize("continuous,near_leader", [(False, True), (True, False)])
@@ -190,7 +190,7 @@ def test_parallel_follow_repair_keeps_real_prerequisites_and_other_endless_depen
         {"kind": "collect", "item_prefabs": ["Raspberry"], "continuous": True,
          "near_leader": True, "depends_on": ["follow", "other"]},
     ]}, world(snapshot))
-    assert batch.tasks[2].depends_on == ["other"]
+    assert batch.tasks[2].depends_on == ["follow", "other"]
     with pytest.raises(ValueError, match="continuous"):
         TaskPool().apply_batch(batch)
 
@@ -331,7 +331,7 @@ async def test_whole_bag_scope_is_independently_confirmed_for_every_provider(sna
             value = {"transfers": [{"kind": "give", "item_prefabs": [], "amount": 1, "selection": "all_inventory"}]}
         else:
             value = model_batch(schema)
-            value["tasks"][1] = {"id": value["tasks"][1]["id"], "kind": "give", "selection": "all_inventory"}
+            value["tasks"][1] = model_task(schema, "give", index=1, selection="all_inventory")
             if provider == "ollama": assert body["options"]["num_predict"] == 6144
         text = json.dumps(value)
         if provider == "ollama":
@@ -367,8 +367,7 @@ async def test_wrapped_atomic_whole_bag_action_is_rejected_before_scope_review(s
         calls.append(scope)
         if scope: value = {"confirmed": False}
         else:
-            task_id = task_properties(body["format"])["id"]["enum"][0]
-            value = {"tasks": [{"id": task_id, "kind": "action", "action": {
+            value = {"tasks": [{"kind": "action", "action": {
                 "action": "give", "target_id": "leader", "item_id": "", "amount": 1,
                 "selection": "all_inventory", "duration": 1, "say": "Передам вещи",
             }}]}
@@ -387,7 +386,7 @@ async def test_truthy_string_is_not_a_whole_inventory_confirmation(snapshot):
         if "confirmed" in schema.get("properties", {}): value = {"confirmed": "true"}
         else:
             value = model_batch(schema)
-            value["tasks"][1] = {"id": value["tasks"][1]["id"], "kind": "drop", "selection": "all_inventory"}
+            value["tasks"][1] = model_task(schema, "drop", index=1, selection="all_inventory")
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(value)}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         state = state_for(client, "openai")
@@ -422,8 +421,7 @@ async def test_each_typed_transfer_is_reviewed_against_original_request_before_p
             assert any(i["item_prefab"] == "Stone" and i["name"] == "Камень" for i in facts["item_types"])
             value = {"transfers": [] if objective.startswith("Следуй") else [{"kind": kind, "item_prefabs": ["Stone"], "amount": amount if confirmed else 5, "selection": selection}]}
         else:
-            task_id = task_properties(schema)["id"]["enum"][0]
-            value = {"tasks": [{"id": task_id, "kind": kind, "item_prefabs": ["Stone"], "amount": amount, "selection": selection}]}
+            value = {"tasks": [model_task(schema, kind, item_prefabs=["Stone"], amount=amount, selection=selection)]}
         text = json.dumps(value)
         if provider == "ollama":
             assert body["think"] is False
@@ -451,9 +449,67 @@ async def test_transfer_review_rejects_yes_instead_of_independent_extraction(sna
         schema = body["response_format"]["json_schema"]["schema"]
         if "transfers" in schema.get("properties", {}): value = {"confirmed": True}
         else:
-            task_id = task_properties(schema)["id"]["enum"][0]
-            value = {"tasks": [{"id": task_id, "kind": "give", "item_prefabs": ["Stone"], "amount": 5}]}
+            value = {"tasks": [model_task(schema, "give", item_prefabs=["Stone"], amount=5)]}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(value)}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ProviderInvalidAction, match="Не удалось независимо определить предметы"):
             await compile_tasks(state_for(client, "openai"), "Дай пять камней", world(snapshot))
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "gemini"])
+def test_cancel_only_proposal_removes_requested_job_and_preserves_follow(snapshot, provider):
+    observed = world(snapshot)
+    pool = TaskPool()
+    following, berries = pool.apply_batch([TaskSpec(kind="follow"),
+        TaskSpec(kind="collect", item_prefabs=["Raspberry"], continuous=True)], snapshot=observed)
+    request = task_request("Больше не собирай малину", observed, existing_tasks=pool.tasks, provider=provider)
+    allowed = request["format"]["$defs"]["TaskEdit"]["properties"]["task_id"]["enum"]
+    assert set(allowed) == {following.id, berries.id}
+    edit = {"action":"cancel", "task_id":berries.id}
+    batch = parse_tasks({"tasks":[], "edits":[edit]}, observed, existing_tasks=pool.tasks)
+    pool.apply_batch(batch, snapshot=observed)
+    assert [task.id for task in pool.tasks] == [following.id]
+    assert pool.history[-1].id == berries.id and pool.history[-1].status == "cancelled"
+    with pytest.raises(ValueError, match="existing task"):
+        parse_tasks({"tasks":[], "edits":[{"action":"cancel", "task_id":"invented"}]},
+                    observed, existing_tasks=pool.tasks)
+
+
+def test_requested_finite_pickup_outranks_ready_standing_gathering(snapshot):
+    observed = world(snapshot)
+    observed.entities[-1] = observed.entities[-1].model_copy(update={"item_prefab":"Stone"})
+    observed.entities.append(observed.entities[-1].model_copy(update={"id":"berries", "name":"Малина", "item_prefab":"Raspberry"}))
+    pool = TaskPool()
+    standing = pool.apply_batch([TaskSpec(kind="collect", item_prefabs=["Raspberry"], continuous=True, priority=60)], snapshot=observed)[0]
+    requested = parse_tasks({"tasks":[{"kind":"collect", "item_prefabs":["Stone"], "amount":1, "selection":"exact",
+                                      "continuous":False, "near_leader":False, "objective":"", "priority":70}]}, observed, require_priority=True)
+    assert requested.tasks[0].priority == 70
+    pool.apply_batch(requested, snapshot=observed)
+    decision, _, selected = pool.next_decision(observed)
+    assert decision.action == "pickup" and decision.target_id == "drop"
+    assert selected.spec.item_prefabs == ["Stone"]
+    assert standing.id in pool.nodes
+
+
+def test_model_priorities_and_explicit_dependency_survive_native_id_binding(snapshot):
+    observed = world(snapshot)
+    batch = parse_tasks({"tasks":[
+        {"id":"acquire", "kind":"collect", "item_prefabs":["Stone"], "amount":5, "priority":14},
+        {"id":"deliver", "kind":"give", "item_prefabs":["Stone"], "amount":5, "priority":89, "depends_on":["acquire"]},
+    ]}, observed, require_priority=True)
+    collect, give = batch.tasks
+    assert give.depends_on == [collect.id]
+    assert (collect.priority, give.priority) == (14, 89)
+    pool = TaskPool()
+    accepted = pool.apply_batch(batch, snapshot=observed)
+    assert accepted[1].spec.depends_on == [accepted[0].id]
+    assert accepted[0].id != collect.id
+
+
+def test_parser_does_not_invent_priority_or_dependencies_for_legacy_native_callers(snapshot):
+    batch = parse_tasks({"tasks":[
+        {"kind":"collect", "item_prefabs":["Stone"], "amount":5},
+        {"kind":"give", "item_prefabs":["Stone"], "amount":5},
+    ]}, world(snapshot))
+    assert [t.priority for t in batch.tasks] == [50, 50]
+    assert all(not t.depends_on for t in batch.tasks)

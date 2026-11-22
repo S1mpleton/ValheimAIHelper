@@ -15,10 +15,18 @@ public sealed partial class Plugin
     internal static void OpenNpcInventory(Player npc)
     {
         NpcInventoryWindow.MarkUseAttempt();
+        // Keep Player.Interact's native use-key/animation callback free of UI
+        // changes. The request is processed by the plugin on a later frame.
+        NpcInventoryWindow.RequestOpen(npc);
+    }
+
+    internal static void ProcessNpcInventoryRequest(Player npc)
+    {
         var p = instance;
-        if (p == null) return;
+        if (p == null) { NpcInventoryLog("Запрос отклонён: плагин ещё не готов."); return; }
         try
         {
+            p.AddLog("npc-inventory", "Обрабатываю запрос обмена с NPC.");
             if (NpcInventoryWindow.TryOpen(npc, () =>
             {
                 p.PauseTasksFromPanel();
@@ -27,15 +35,15 @@ public sealed partial class Plugin
                 Game.Unpause();
             }, out string error))
             {
-                p.status = "Обмен вещами с NPC. Следование / AI можно включить после закрытия.";
+                p.status = "Открываю обмен вещами с NPC. Задачи остаются на паузе после закрытия.";
                 p.uiMessage = p.status;
-                p.AddLog("npc-inventory", "Открыт инвентарь " + npc.GetPlayerName() + "; управление NPC остановлено.");
+                p.AddLog("npc-inventory", "Запрос обмена принят для " + npc.GetPlayerName() + "; управление NPC приостановлено.");
             }
             else
             {
                 p.uiError = error;
                 p.AddLog("npc-inventory", error);
-                if (Player.m_localPlayer) Player.m_localPlayer.Message(MessageHud.MessageType.Center, error);
+                NpcInventoryWindow.Notify(error);
             }
         }
         catch (Exception ex)
@@ -43,7 +51,7 @@ public sealed partial class Plugin
             NpcInventoryWindow.Close();
             p.uiError = "Не удалось открыть инвентарь NPC. Подробности в журнале.";
             p.AddLog("npc-inventory", ex.ToString());
-            if (Player.m_localPlayer) Player.m_localPlayer.Message(MessageHud.MessageType.Center, p.uiError);
+            NpcInventoryWindow.Notify(p.uiError);
         }
     }
 }

@@ -64,10 +64,28 @@ class TaskSpec(StrictModel):
         return self
 
 
+class TaskEdit(StrictModel):
+    action: Literal["cancel", "pause", "resume", "priority"]
+    task_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    priority: int = Field(default=50, ge=0, le=90)
+
+    @model_validator(mode="after")
+    def explicit_priority(self):
+        if self.action == "priority" and "priority" not in self.model_fields_set:
+            raise ValueError("A priority edit must explicitly name the model's priority")
+        return self
+
+
 class TaskBatch(StrictModel):
     mode: Literal["append", "replace"] = "append"
     combat_policy: Literal["defend", "avoid"] = "defend"
-    tasks: list[TaskSpec] = Field(min_length=1, max_length=LIMIT)
+    tasks: list[TaskSpec] = Field(default_factory=list, max_length=LIMIT)
+    edits: list[TaskEdit] = Field(default_factory=list, max_length=LIMIT)
+
+    @model_validator(mode="after")
+    def nonempty(self):
+        if not self.tasks and not self.edits: raise ValueError("A task batch needs tasks or edits")
+        return self
 
 
 # Alias for integrations that call a model's response a proposal.
@@ -115,10 +133,12 @@ class TaskPool:
         self._lease: Decision | None = None
         self._last_tick: float | None = None
         self._was_suspended = False
-        self._catchup = False
         self._excluded: dict[str, float] = {}
         self._last_snapshot = None
         self._receipts: dict[str, str] = {}
+        self._turn = 0
+        self._served: dict[str, int] = {}
+        self.migration_note = ""
 
     @property
     def tasks(self): return list(self.nodes.values())
@@ -138,6 +158,7 @@ class TaskPool:
     def _record_terminal(self, node, status, reason):
         node.status, node.reason = status, reason[:240]
         self.nodes.pop(node.id, None)
+        self._served.pop(node.id, None)
         self.history.append(node)
         self._receipts[node.id] = status
         if self.active_id == node.id: self.active_id = ""
@@ -155,50 +176,107 @@ class TaskPool:
                     self._record_terminal(node, "failed", "Предшествующая задача отменена или не выполнена")
                     changed = True
 
+    @staticmethod
+    def _order_key(spec, resolve=lambda value: value):
+        if spec.kind == "follow": return ("follow",)
+        if spec.kind != "collect": return None
+        types = frozenset(spec.item_prefabs)
+        # A standing order is one job, even if a small model changes its title,
+        # priority, amount or radius when restating the same request.
+        if spec.continuous: return ("collect", True, types)
+        # Sequential acquisition phases remain distinct when their actual
+        # prerequisites differ. A restated target stock updates the same phase.
+        return ("collect", False, types, frozenset(resolve(d) for d in spec.depends_on))
+
+    @staticmethod
+    def _typed_title(spec, snapshot=None):
+        if spec.kind == "follow": return "Следовать за лидером"
+        if spec.kind not in ("collect", "give", "drop"): return spec.title
+        names = {}
+        if snapshot is not None:
+            names.update((entry.item_prefab, entry.name) for entry in snapshot.item_catalog if entry.name)
+            for item in [*snapshot.actor.inventory, *snapshot.entities]:
+                prefab = prefab_of(item, snapshot)
+                if prefab and item.name: names.setdefault(prefab, item.name)
+        verb = {"collect":"Собирать", "give":"Передать", "drop":"Сбросить"}[spec.kind]
+        if spec.selection == "all_inventory": return verb + " все вещи"
+        text = ", ".join(names.get(prefab, prefab) for prefab in spec.item_prefabs)
+        suffix = "" if spec.continuous or spec.selection == "all_matching" else " ×" + str(spec.amount)
+        return (verb + (" все: " if spec.selection == "all_matching" else ": ") + text + suffix)[:160]
+
     def apply_batch(self, specs, mode="append", snapshot=None, *, source_request=""):
         if not isinstance(source_request, str) or len(source_request) > 1000:
             raise ValueError("Invalid original source request")
-        policy = self.combat_policy
-        if isinstance(specs, TaskBatch): policy, mode, specs = specs.combat_policy, specs.mode, specs.tasks
+        policy, edits = self.combat_policy, []
+        if isinstance(specs, TaskBatch): policy, mode, edits, specs = specs.combat_policy, specs.mode, specs.edits, specs.tasks
+        edits = [TaskEdit.model_validate(edit.model_dump() if isinstance(edit, TaskEdit) else edit) for edit in edits]
         if mode not in ("append", "replace"): raise ValueError("Unknown task batch mode")
         values = [TaskSpec.model_validate(s.model_dump() if isinstance(s, TaskSpec) else s) for s in specs]
-        if not values or len(values) > LIMIT: raise ValueError("Task batch must contain 1..15 tasks")
+        if (not values and not edits) or len(values) > LIMIT or len(edits) > LIMIT: raise ValueError("Task batch must contain tasks or edits, at most 15 each")
         if len({s.id for s in values}) != len(values): raise ValueError("Duplicate task ids")
-        existing = {} if mode == "replace" else self.nodes
+        if edits and mode == "replace": raise ValueError("Use either task edits or replacement, not both")
+        if len({edit.task_id for edit in edits}) != len(edits): raise ValueError("Conflicting edits for one task")
+        if any(edit.task_id not in self.nodes for edit in edits): raise ValueError("Task edit refers to unknown existing task")
+        cancelled = {edit.task_id for edit in edits if edit.action == "cancel"}
+        removed = set(cancelled)
+        while True:
+            cascade = {node.id for node in self.nodes.values() if removed.intersection(node.spec.depends_on)}
+            if cascade <= removed: break
+            removed.update(cascade)
+        existing = {} if mode == "replace" else {key: node for key, node in self.nodes.items() if key not in removed}
         completed = {task_id for task_id, status in self._receipts.items() if status == "completed"}
-        follow = next((n for n in existing.values() if n.kind == "follow"), None)
         mapping, rewritten = {}, []
-        first_follow = follow.id if follow else None
-        for spec in values:
-            if spec.kind == "follow" and first_follow:
-                mapping[spec.id] = first_follow
-            else:
-                mapping[spec.id] = uuid.uuid4().hex
-                if spec.kind == "follow": first_follow = mapping[spec.id]
-        # An ongoing collection rule is a standing order, like follow. Repeated
-        # phrasing updates that order rather than consuming another pool slot.
-        def collection_key(spec, remap=False):
-            return (frozenset(spec.item_prefabs), spec.selection, spec.near_leader,
-                    spec.max_distance, frozenset(mapping.get(d, d) if remap else d for d in spec.depends_on))
-        collections = {collection_key(n.spec): n.id for n in existing.values()
-                       if n.kind == "collect" and n.spec.continuous}
-        for spec in values:
-            if spec.kind == "collect" and spec.continuous:
-                key = collection_key(spec, remap=True)
-                if key in collections: mapping[spec.id] = collections[key]
-                else: collections[key] = mapping[spec.id]
+        mapping = {spec.id: uuid.uuid4().hex for spec in values}
+        aliases = {}
+        def resolve(value):
+            value = mapping.get(value, value)
+            while value in aliases: value = aliases[value]
+            return value
+        # Dependencies may refer forward to another proposed task. Resolve
+        # order aliases before comparing acquisition phases, regardless of the
+        # order in which the model serialized them.
+        for _ in range(len(values) + 1):
+            changed = False
+            orders = {self._order_key(node.spec, resolve): node.id for node in existing.values() if self._order_key(node.spec, resolve) is not None}
+            for spec in values:
+                key, current = self._order_key(spec, resolve), resolve(spec.id)
+                if key is None: continue
+                canonical = orders.get(key, current)
+                if canonical != current: aliases[current] = canonical; changed = True
+                orders[key] = canonical
+            if not changed: break
+        mapping = {task_id: resolve(task_id) for task_id in mapping}
         known = set(existing) | completed | set(mapping)
         for spec in values:
             if any(d not in known for d in spec.depends_on): raise ValueError("Unknown task dependency")
-            rewritten.append(spec.model_copy(update={"id": mapping[spec.id], "depends_on": [mapping.get(d, d) for d in spec.depends_on]}))
+            rewritten.append(spec.model_copy(update={"id": mapping[spec.id],
+                "depends_on": list(dict.fromkeys(mapping.get(d, d) for d in spec.depends_on)),
+                "title": self._typed_title(spec, snapshot or self._last_snapshot)}))
         final_specs = {n.id: n.spec for n in existing.values()}
+        for edit in edits:
+            if edit.action == "priority" and edit.task_id in final_specs:
+                final_specs[edit.task_id] = final_specs[edit.task_id].model_copy(update={"priority": edit.priority})
         for spec in rewritten: final_specs[spec.id] = spec
         if len(final_specs) > LIMIT: raise ValueError("Пул заполнен: максимум 15 активных задач")
         self._validate_graph(final_specs, completed)
         # Everything above is side-effect free. A rejected batch never evicts.
         if mode == "replace":
+            self.interrupt("Заменено новым поручением")
             for node in list(self.nodes.values()): self._record_terminal(node, "cancelled", "Заменено новым поручением")
-            self._catchup = False
+        elif self._lease_task in removed or any(edit.task_id == self._lease_task and edit.action == "pause" for edit in edits):
+            self.interrupt("Текущая задача изменена новым поручением")
+        for task_id in removed:
+            node = self.nodes.get(task_id)
+            if node:
+                self._record_terminal(node, "cancelled" if task_id in cancelled else "failed",
+                    "Отменено новым поручением" if task_id in cancelled else "Предшествующая задача отменена новым поручением")
+        for edit in edits:
+            node = self.nodes.get(edit.task_id)
+            if node is None: continue
+            if edit.action == "priority": node.spec = node.spec.model_copy(update={"priority": edit.priority})
+            elif edit.action == "pause": node.manual_paused = True; node.status, node.reason = "paused", "Приостановлено новым поручением"
+            elif edit.action == "resume":
+                node.manual_paused = False; node.retry_at = 0; node.attempts = 0; node.status, node.reason = "queued", ""
         accepted = []
         for spec in rewritten:
             if spec.id in self.nodes:
@@ -209,11 +287,12 @@ class TaskPool:
             else:
                 node = TaskNode(spec=spec, source_request=source_request)
                 self.nodes[spec.id] = node
-            if node not in accepted: accepted.append(node)
-        self.paused = False
+            if all(old.id != node.id for old in accepted): accepted.append(node)
         self.combat_policy = policy
         self.revision += 1
-        if snapshot is not None: self._update_counts(snapshot)
+        if snapshot is not None:
+            self._last_snapshot = snapshot
+            self._update_counts(snapshot)
         return accepted
 
     @staticmethod
@@ -269,6 +348,8 @@ class TaskPool:
                             "; проверьте инвентарь, исходное количество не повторяется")
                     else:
                         node.confirmed_steps += 1
+                        self._turn += 1
+                        self._served[node.id] = self._turn
                         node.attempts = 0
                         if node.spec.continuous: node.elapsed = 0
                         if node.kind == "action" or node.kind == "give" and decision.action == Action.GIVE or node.kind == "drop" and decision.action == Action.DROP:
@@ -315,9 +396,8 @@ class TaskPool:
             if not matching: continue
             distance = self._distance(entity.position, snapshot.actor.position)
             radius = min(node.spec.max_distance, 8) if node.spec.near_leader else node.spec.max_distance
-            if entity.kind == "interactable": radius = min(radius, 20)
             if distance > radius: continue
-            if node.spec.near_leader and (not leader or self._distance(entity.position, leader.position) > 10 or self._catchup): continue
+            if node.spec.near_leader and (not leader or self._distance(entity.position, leader.position) > 10): continue
             out.append(entity)
         return sorted(out, key=lambda e: (self._distance(e.position, snapshot.actor.position), e.id))
 
@@ -342,7 +422,7 @@ class TaskPool:
         if node.retry_at > now: return False, "Пауза после отказа игры"
         leader = self._leader(snapshot)
         if node.kind == "follow": return bool(leader) and "follow" in snapshot.supported_actions, "Лидер не виден или следование не поддерживается"
-        if node.spec.near_leader and (not leader or self._catchup): return False, "Сбор приостановлен: нужно вернуться к лидеру"
+        if self._outside_leader_scope(node, snapshot): return False, "Нет цели в заданных границах рядом с лидером"
         if node.kind == "collect":
             if snapshot.actor.encumbered: return False, "Сумка перегружена"
             return bool(self._sources(node, snapshot, now)), "Подходящих вещей или урожая в разрешённом радиусе не видно"
@@ -357,6 +437,13 @@ class TaskPool:
             except ValueError: return False, "Цель или условия атомарного действия недоступны"
         return True, ""
 
+    def _outside_leader_scope(self, node, snapshot):
+        if not node.spec.near_leader: return False
+        leader = self._leader(snapshot)
+        # This is the geometric condition requested by near_leader, not a
+        # priority policy. Both target-distance constraints must be satisfiable.
+        return leader is None or self._distance(snapshot.actor.position, leader.position) > min(node.spec.max_distance, 8) + 10
+
     def select(self, snapshot, now=None):
         now = self.observe(snapshot, now)
         if self.paused or snapshot.simulation_paused or getattr(snapshot, "reflex_active", False) or snapshot.actor.health <= 0:
@@ -364,30 +451,25 @@ class TaskPool:
                 if not node.manual_paused: node.status, node.reason = "paused", "Пул приостановлен" if self.paused else "NPC недоступен" if snapshot.actor.health <= 0 else "Игра выполняет немедленную защиту" if getattr(snapshot, "reflex_active", False) else "Игра на паузе"
             self.active_id = ""
             return None
-        leader = self._leader(snapshot)
-        follow_exists = any(n.kind == "follow" and not n.manual_paused for n in self.nodes.values())
-        if follow_exists:
-            distance = self._distance(snapshot.actor.position, leader.position) if leader else float("inf")
-            if distance >= 14: self._catchup = True
-            elif distance <= 6: self._catchup = False
-        else: self._catchup = False
         candidates = []
         for index, node in enumerate(self.nodes.values()):
             ready, reason = self._ready(node, snapshot, now)
             if not ready:
-                node.status = "paused" if node.manual_paused or node.spec.near_leader and self._catchup else "blocked"
+                node.status = "paused" if node.manual_paused or self._outside_leader_scope(node, snapshot) else "blocked"
                 node.reason = reason
                 continue
             priority = node.priority
-            if node.kind == "follow":
-                priority = max(priority, 80) if self._catchup else min(priority, 30)
             node.status, node.reason = "queued", "Ожидает более приоритетную задачу"
-            candidates.append((priority, node.id == self.active_id, -index, node))
-        selected = max(candidates, key=lambda c: c[:3])[3] if candidates else None
+            candidates.append((priority, -self._served.get(node.id, 0), node.id == self.active_id, -index, node))
+        selected = max(candidates, key=lambda c: c[:4])[4] if candidates else None
         leased = self.nodes.get(self._lease_task)
-        if leased and self._lease and self._lease.action in MUTATING:
+        lease_candidate = next((candidate for candidate in candidates if candidate[4] == leased), None)
+        selected_candidate = next((candidate for candidate in candidates if candidate[4] == selected), None)
+        if leased and self._lease and (self._lease.action in MUTATING or
+                lease_candidate is not None and selected_candidate is not None and lease_candidate[0] == selected_candidate[0]):
             # Do not lose a transfer's receipt then accidentally replay its full
-            # quantity. Native safety reflexes still preempt controls locally.
+            # quantity. Equal priorities rotate only after an actual step ACK,
+            # never while the executor is still approaching its current item.
             selected = leased
         new_id = selected.id if selected else ""
         if self._lease_task and self._lease_task != new_id: self._clear_lease()
@@ -539,8 +621,8 @@ class TaskPool:
 
     def status(self):
         def row(n):
-            target = ", ".join(n.spec.item_prefabs) or ("лидер" if n.kind == "follow" else "все вещи" if n.spec.selection == "all_inventory" else "")
-            return {"id": n.id, "kind": n.kind, "title": n.title, "objective": n.objective,
+            target = "лидер" if n.kind == "follow" else ", ".join(n.spec.item_prefabs) or ("все вещи" if n.spec.selection == "all_inventory" else "")
+            return {"id": n.id, "kind": n.kind, "title": (self._typed_title(n.spec, self._last_snapshot) if self._last_snapshot else n.title) or n.title, "objective": n.objective,
                 "priority": n.priority, "status": n.status, "reason": n.reason, "depends_on": n.spec.depends_on,
                 "continuous": n.spec.continuous, "progress": str(n.count) + (" / ∞" if n.spec.continuous else " / " + str(n.spec.amount)) if n.kind == "collect" else str(n.completed_amount) if n.completed_amount else "",
                 "target": target, "confirmed_steps": n.confirmed_steps}
@@ -581,6 +663,55 @@ class TaskPool:
             tmp.unlink(missing_ok=True)
 
     @classmethod
+    def _merge_saved_orders(cls, nodes):
+        """Migrate 0.8 standing-order duplicates without duplicating progress.
+
+        Keep the first persistent identity; aliases in dependent tasks point to
+        it. Stronger pause/proximity restrictions survive consolidation.
+        Transfers and arbitrary goals are never merged.
+        """
+        aliases = {node.id: node.id for node in nodes}
+        def resolve(value):
+            while value in aliases and aliases[value] != value: value = aliases[value]
+            return value
+        for _ in range(len(nodes) + 1):
+            changed, orders = False, {}
+            for node in nodes:
+                key = cls._order_key(node.spec, resolve)
+                if key is None: continue
+                current = resolve(node.id)
+                canonical = orders.get(key, current)
+                if canonical != current: aliases[current] = canonical; changed = True
+                orders[key] = canonical
+            if not changed: break
+        result = OrderedDict()
+        for node in nodes:
+            canonical = resolve(node.id)
+            if canonical not in result:
+                result[canonical] = node.model_copy(deep=True)
+                result[canonical].spec = node.spec.model_copy(update={"id": canonical})
+                continue
+            first = result[canonical]
+            first.spec = first.spec.model_copy(update={
+                "amount": max(first.spec.amount, node.spec.amount),
+                "near_leader": first.spec.near_leader or node.spec.near_leader,
+                "max_distance": min(first.spec.max_distance, node.spec.max_distance),
+                "depends_on": list(dict.fromkeys([*first.spec.depends_on, *node.spec.depends_on])),
+            })
+            first.manual_paused |= node.manual_paused
+            first.needs_refresh |= node.needs_refresh
+            for field in ("count", "elapsed", "attempts", "confirmed_steps", "completed_amount"):
+                setattr(first, field, max(getattr(first, field), getattr(node, field)))
+            if not first.source_request: first.source_request = node.source_request
+            if not first.last_outcome: first.last_outcome = node.last_outcome
+        for node in result.values():
+            node.spec = node.spec.model_copy(update={
+                "depends_on": list(dict.fromkeys(resolve(dep) for dep in node.spec.depends_on)),
+                "title": cls._typed_title(node.spec),
+            })
+        return result, len(nodes) - len(result)
+
+    @classmethod
     def load(cls, path, world_id):
         pool = cls()
         path = Path(path)
@@ -589,7 +720,8 @@ class TaskPool:
         if data.get("version") != 1 or data.get("world_id") != str(world_id): raise ValueError("Saved task pool belongs to another world")
         nodes = [TaskNode.model_validate(value) for value in data.get("tasks", [])]
         if len(nodes) > LIMIT or len({n.id for n in nodes}) != len(nodes): raise ValueError("Invalid saved task pool size or ids")
-        pool.nodes = OrderedDict((n.id, n) for n in nodes if n.status not in TERMINAL)
+        active = [node for node in nodes if node.status not in TERMINAL]
+        pool.nodes, merged = cls._merge_saved_orders(active)
         receipts = data.get("receipts", {})
         if not isinstance(receipts, dict) or any(not isinstance(k, str) or v not in TERMINAL for k, v in receipts.items()):
             raise ValueError("Invalid task completion receipts")
@@ -598,7 +730,8 @@ class TaskPool:
         # Completed dependencies no longer need a receipt after explicit save;
         # unknown remaining dependencies remain blocked rather than executing.
         pool.paused = bool(pool.nodes)
-        pool.revision = max(0, int(data.get("revision", 0)))
+        pool.revision = max(0, int(data.get("revision", 0))) + bool(merged)
+        if merged: pool.migration_note = "Объединены повторные задачи старой версии: " + str(merged)
         policy = data.get("combat_policy", "defend")
         if policy not in ("defend", "avoid"): raise ValueError("Invalid combat policy")
         pool.combat_policy = policy

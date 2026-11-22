@@ -19,7 +19,7 @@ public sealed partial class Plugin
     private string lastLocalBlock = "";
     private float nextLocalBlockReply;
     private int observedGroundItems;
-    private string observedInventory = "", observedDrops = "";
+    private string observedInventory = "", observedDrops = "", observedCollectibles = "";
 
     private void ReportLocalBlock()
     {
@@ -35,7 +35,7 @@ public sealed partial class Plugin
     private void InitRuntime()
     {
         journal.RegisterSecret(bridgeToken.Value);
-        AddLog("version", "Valheim AI Helper 0.8.0; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
+        AddLog("version", "Valheim AI Helper 0.8.1; Valheim " + global::Version.GetVersionString() + "; references 0.221.4");
         if (!autoBridge.Value) { AddLog("service", "Автозапуск выключен в конфигурации; используется внешний мост."); return; }
         StartLocalRuntime();
     }
@@ -78,6 +78,8 @@ public sealed partial class Plugin
     {
         observedGroundItems = observation.Data.ground_items_total;
         observedInventory = string.Join("; ", observation.Data.actor.inventory.Select(i => i.name + " ×" + i.count + " [" + i.id + "]"));
+        observedCollectibles = string.Join("; ", observation.Data.entities.Where(e => e.kind == "interactable" && e.category == "pickable")
+            .Select(e => e.name + " → " + string.Join(",", e.produces ?? Array.Empty<string>()) + " (" + e.distance.ToString("0") + "м) [" + e.id + "]"));
         observedDrops = string.Join("; ", observation.Data.entities.Where(e => e.kind == "item").Select(e => e.name + " ×" + e.count + " (" + e.distance.ToString("0") + "м) [" + e.id + "]")) +
             (observation.Data.ground_items_truncated ? "; показаны ближайшие 80 стопок" : "");
         string message = decision.source + " · " + decision.action + " · " + decision.target_id + " · " + executor.Result;
@@ -98,15 +100,17 @@ public sealed partial class Plugin
                 if (events[i].source == "assistant" && allowChat.Value && Player.m_localPlayer) ChatReply(events[i].message);
             }
     }
-    private string Report() => journal.Redact("Valheim AI Helper 0.8.0\nValheim: " + global::Version.GetVersionString() +
+    private string Report() => journal.Redact("Valheim AI Helper 0.8.1\nValheim: " + global::Version.GetVersionString() +
         "\nMode: " + (active ? bridgeStatus?.mode ?? "connecting" : "npc stopped") + "\nLeader: " + (FindLeader() ? resolvedLeaderName : leaderName.Value) +
         "\nLeader mode: " + leaderMode.Value + "; resolved: " + (FindLeader() ? FindLeader()!.GetPlayerName() : "unavailable") + "\nMotor: " + executor.MotorState + "\nArchitecture: one client + NPC; host-authoritative\nNPC: " + (CurrentNpc ? CurrentNpc!.GetPlayerName() + " / " + CurrentNpc.GetZDOID() : "not loaded") + "\nHuman: " + (Player.m_localPlayer ? Player.m_localPlayer.GetPlayerName() : "none") + "\nAI: " + uiProvider + " / " + uiModel + (uiProvider == "ollama" ? "\nOllama: " + (BridgeAddress.IsValid(uiOllamaUrl) ? uiOllamaUrl : "(некорректный адрес)") + "; think=false" : "") + "\nCombat: " + allowCombat.Value + "; survival: " + autoSurvival.Value + "; chat control: " + (controlByAllPlayers.Value ? "all players" : "leader only") +
         "\nPerformance: " + AiPerformanceText.Summary(bridgeStatus?.performance) + "\n" + AiPerformanceText.Details(bridgeStatus?.performance) +
+        "\nChat routing: " + (PrivateNpcConversation() ? "single-human direct dialogue" : "context model") +
         "\n" + TaskPoolReport() +
         "\nItem catalog: " + ItemCatalogReport() +
         "\nNPC inventory now: " + CurrentNpcInventoryReport() +
         "\nLast AI observation - ground items: " + observedGroundItems +
         "\nLast AI observation - inventory: " + observedInventory + "\nLast AI observation - dropped items: " + observedDrops +
+        "\nLast AI observation - E collectibles: " + observedCollectibles +
         "\nStatus: " + status + "\nError: " + uiError + "\n\n" + journal.Text);
     private string CurrentNpcInventoryReport()
     {

@@ -3,7 +3,14 @@ import json
 import pytest
 
 from valheim_ai.protocol import Decision, Snapshot
-from valheim_ai.task_pool import LIMIT, TaskBatch, TaskPool, TaskSpec
+from valheim_ai.task_pool import LIMIT, TaskBatch, TaskEdit, TaskNode, TaskPool, TaskSpec
+
+
+def test_ai_priority_change_cannot_use_an_implicit_default():
+    with pytest.raises(ValueError, match="explicitly"):
+        TaskEdit(action="priority", task_id="existing_job")
+    assert TaskEdit(action="priority", task_id="existing_job", priority=13).priority == 13
+    assert TaskEdit(action="cancel", task_id="existing_job").action == "cancel"
 
 
 def world(snapshot, *, leader=3, drops=(("berries", 2, 0),), stock=0):
@@ -66,16 +73,180 @@ def test_collection_dedup_preserves_dependency_identity_and_rejects_continuous_d
     assert pool.status()==before
 
 
-@pytest.mark.parametrize('changes',[
-    {'continuous':False}, {'near_leader':True}, {'max_distance':8},
-    {'selection':'all_matching'}, {'item_prefabs':['Stone']},
+@pytest.mark.parametrize('changes,expected',[
+    ({'continuous':False},2), ({'near_leader':True},1), ({'max_distance':8},1),
+    ({'selection':'all_matching'},1), ({'item_prefabs':['Stone']},2),
 ])
-def test_collection_orders_with_different_execution_conditions_remain_separate(changes):
+def test_one_standing_order_updates_its_conditions_but_distinct_items_and_finite_phases_remain_separate(changes,expected):
     pool=TaskPool()
     pool.apply_batch([TaskSpec(kind='collect',item_prefabs=['Raspberry'],continuous=True)])
     spec={'kind':'collect','item_prefabs':['Raspberry'],'continuous':True,**changes}
     pool.apply_batch([TaskSpec.model_validate(spec)])
-    assert len(pool.tasks)==2
+    assert len(pool.tasks)==expected
+
+
+def test_restated_finite_acquisition_updates_stock_goal_but_later_phases_and_transfers_are_distinct():
+    pool=TaskPool()
+    first=pool.apply_batch([collect(amount=5)])[0]
+    first.manual_paused=True
+    same=pool.apply_batch([collect(amount=8,near_leader=True)])[0]
+    assert same is first and same.spec.amount==8 and same.manual_paused
+    gives=pool.apply_batch([TaskSpec(id='give1',kind='give',item_prefabs=['Raspberry'],amount=5,depends_on=[first.id]),
+        TaskSpec(id='give2',kind='give',item_prefabs=['Raspberry'],amount=5,depends_on=[first.id])])
+    assert len(gives)==2 and gives[0].id!=gives[1].id
+    later=pool.apply_batch([TaskSpec(kind='collect',item_prefabs=['Raspberry'],amount=5,depends_on=[gives[0].id])])[0]
+    assert later.id!=first.id and len(pool.tasks)==4
+
+
+def test_forward_dependency_aliases_identify_the_same_acquisition_phase():
+    pool=TaskPool()
+    nodes=pool.apply_batch([
+        TaskSpec(id='first',kind='collect',item_prefabs=['Raspberry'],amount=5,depends_on=['prepare1']),
+        TaskSpec(id='second',kind='collect',item_prefabs=['Raspberry'],amount=7,depends_on=['prepare2']),
+        TaskSpec(id='prepare1',kind='collect',item_prefabs=['Stone'],amount=1),
+        TaskSpec(id='prepare2',kind='collect',item_prefabs=['Stone'],amount=1),
+    ])
+    assert len(nodes)==2 and len(pool.tasks)==2
+    berries=next(node for node in pool.tasks if node.spec.item_prefabs==['Raspberry'])
+    stone=next(node for node in pool.tasks if node.spec.item_prefabs==['Stone'])
+    assert berries.spec.depends_on==[stone.id] and berries.spec.amount==7
+
+
+def test_typed_titles_report_actual_action_and_local_item_identity(snapshot):
+    state=world(snapshot)
+    pool=TaskPool()
+    tracking,berries=pool.apply_batch([TaskSpec(kind='follow',title='Малина по пути'),
+        TaskSpec(kind='collect',title='Следовать',item_prefabs=['Raspberry'],continuous=True)],snapshot=state)
+    assert tracking.title=='Следовать за лидером'
+    assert berries.title=='Собирать: Малина'
+    rows=pool.status()['tasks']
+    assert rows[0]['title']!=rows[1]['title'] and 'Малина' not in rows[0]['title']
+
+
+def test_loading_080_duplicates_keeps_one_identity_and_rewrites_dependent_ids(tmp_path):
+    path=tmp_path/'old-pool.json'
+    specs=[TaskSpec(id='follow1',kind='follow',title='Малина по пути',priority=30),
+        TaskSpec(id='follow2',kind='follow',priority=30),
+        TaskSpec(id='berries1',kind='collect',item_prefabs=['Raspberry'],continuous=True,near_leader=True,max_distance=8,priority=60),
+        TaskSpec(id='berries2',kind='collect',item_prefabs=['Raspberry'],continuous=True,priority=30),
+        TaskSpec(id='stock1',kind='collect',item_prefabs=['Stone'],amount=5),
+        TaskSpec(id='stock2',kind='collect',item_prefabs=['Stone'],amount=7),
+        TaskSpec(id='delivery',kind='give',item_prefabs=['Stone'],amount=5,depends_on=['stock2'])]
+    nodes=[TaskNode(spec=spec,count=2 if spec.id=='berries1' else 3 if spec.id=='berries2' else 0) for spec in specs]
+    path.write_text(json.dumps({'version':1,'world_id':'world','revision':9,'tasks':[n.model_dump(mode='json') for n in nodes],
+        'combat_policy':'avoid','receipts':{}},ensure_ascii=False),encoding='utf-8')
+    pool=TaskPool.load(path,'world')
+    assert list(pool.nodes)==['follow1','berries1','stock1','delivery'] and pool.revision==10
+    assert pool.migration_note and pool.paused and all(node.manual_paused for node in pool.tasks)
+    assert pool.get('berries1').count==3 and pool.get('berries1').priority==60
+    assert pool.get('berries1').spec.near_leader and pool.get('berries1').spec.max_distance==8
+    assert pool.get('stock1').spec.amount==7 and pool.get('delivery').spec.depends_on==['stock1']
+    assert pool.get('follow1').title=='Следовать за лидером' and pool.combat_policy=='avoid'
+    pool.save(path,'world')
+    again=TaskPool.load(path,'world')
+    assert len(again.tasks)==4 and again.revision==10 and not again.migration_note
+
+
+def test_model_edit_cancels_only_requested_collection_and_keeps_other_work(snapshot):
+    pool=TaskPool()
+    tracking,berries,stones=pool.apply_batch([follow(),collect(continuous=True),
+        TaskSpec(kind='collect',item_prefabs=['Stone'],continuous=True,priority=60)])
+    pool.next_decision(world(snapshot),now=0)
+    accepted=pool.apply_batch(TaskBatch(edits=[TaskEdit(action='cancel',task_id=berries.id)]),source_request='Не собирай больше малину')
+    assert accepted==[] and berries.id not in pool.nodes
+    assert set(pool.nodes)=={tracking.id,stones.id} and pool.history[-1].status=='cancelled'
+    assert pool.next_decision(world(snapshot),now=1)[0].action.value=='follow'
+
+
+def test_edit_and_new_tasks_commit_atomically_after_all_validation():
+    pool=TaskPool()
+    original=pool.apply_batch([TaskSpec(kind='goal',objective=str(n)) for n in range(15)])
+    before=pool.status()
+    with pytest.raises(ValueError,match='unknown'):
+        pool.apply_batch(TaskBatch(tasks=[follow()],edits=[TaskEdit(action='cancel',task_id='unknown')]))
+    assert pool.status()==before
+    with pytest.raises(ValueError,match='Conflicting'):
+        pool.apply_batch(TaskBatch(edits=[TaskEdit(action='pause',task_id=original[0].id),TaskEdit(action='cancel',task_id=original[0].id)]))
+    assert pool.status()==before
+    accepted=pool.apply_batch(TaskBatch(tasks=[follow()],edits=[TaskEdit(action='cancel',task_id=original[0].id)]))
+    assert len(pool.tasks)==15 and accepted[0].kind=='follow' and original[0].id not in pool.nodes
+
+
+def test_cancelled_prerequisites_cascade_and_cannot_be_reintroduced_as_new_dependencies():
+    pool=TaskPool()
+    stock,delivery=pool.apply_batch([collect(amount=5),TaskSpec(kind='give',item_prefabs=['Raspberry'],amount=5,depends_on=['collect'])])
+    before=pool.status()
+    with pytest.raises(ValueError,match='Unknown task dependency'):
+        pool.apply_batch(TaskBatch(tasks=[TaskSpec(kind='goal',objective='После отменённой задачи',depends_on=[stock.id])],
+            edits=[TaskEdit(action='cancel',task_id=stock.id)]))
+    assert pool.status()==before
+    pool.apply_batch(TaskBatch(edits=[TaskEdit(action='cancel',task_id=stock.id)]))
+    assert not pool.tasks and {node.status for node in pool.history}=={'cancelled','failed'}
+    assert next(node for node in pool.history if node.id==delivery.id).status=='failed'
+
+
+def test_edit_pause_resume_and_priority_do_not_interrupt_an_unrelated_inventory_transaction(snapshot):
+    pool=TaskPool()
+    giving,berries=pool.apply_batch([TaskSpec(kind='give',item_prefabs=['Raspberry'],amount=2,priority=80),collect(continuous=True)])
+    state=world(snapshot,stock=3)
+    decision,lease,_=pool.next_decision(state,now=0)
+    assert decision.action.value=='give'
+    pool.apply_batch(TaskBatch(edits=[TaskEdit(action='pause',task_id=berries.id)]))
+    assert berries.manual_paused and pool.lease_task_id==giving.id and pool.plan_id==lease
+    pool.apply_batch(TaskBatch(edits=[TaskEdit(action='priority',task_id=berries.id,priority=90)]))
+    assert berries.priority==90 and pool.next_decision(state,now=1)[1]==lease
+    pool.apply_batch(TaskBatch(edits=[TaskEdit(action='resume',task_id=berries.id)]))
+    assert not berries.manual_paused and pool.next_decision(state,now=2)[1]==lease
+
+
+def test_applying_a_batch_does_not_implicitly_clear_a_global_pause(snapshot):
+    pool=TaskPool()
+    berries=pool.apply_batch([collect(continuous=True)])[0]
+    pool.control('pause')
+    pool.apply_batch(TaskBatch(edits=[TaskEdit(action='priority',task_id=berries.id,priority=80)]))
+    assert pool.paused and pool.next_decision(world(snapshot),now=1)[0].action.value=='wait'
+    pool.apply_batch([follow()])
+    assert pool.paused
+    pool.unpause()
+    assert not pool.paused and pool.next_decision(world(snapshot),now=2)[2].id==berries.id
+
+
+def test_equal_priority_gathering_rotates_after_receipts_and_not_while_approaching(snapshot):
+    pool=TaskPool()
+    berries,stones=pool.apply_batch([collect(continuous=True),TaskSpec(kind='collect',item_prefabs=['Stone'],continuous=True,priority=60)])
+    state=world(snapshot)
+    stone=state.entities[-1].model_copy(update={'id':'stone','item_prefab':'Stone','name':'Камень',
+        'position':dict(x=3,y=0,z=0),'distance':3})
+    # model_copy does not validate nested types, so keep the native Position.
+    stone=stone.model_copy(update={'position':state.entities[-1].position.model_copy(update={'x':3})})
+    state=state.model_copy(update={'entities':[*state.entities,stone]})
+    first,lease,node=pool.next_decision(state,now=0)
+    assert node.id==berries.id
+    for stamp in (1,2,3):
+        renewed,same,node=pool.next_decision(state.model_copy(update={'plan_id':lease,'action_status':'running'}),now=stamp)
+        assert node.id==berries.id and same==lease
+    second,second_id,node=pool.next_decision(state.model_copy(update={'plan_id':lease,'action_status':'success'}),now=4)
+    assert node.id==stones.id and second.action.value=='pickup' and second_id!=lease
+    assert pool.next_decision(state.model_copy(update={'plan_id':second_id,'action_status':'running'}),now=5)[2].id==stones.id
+    assert pool.next_decision(state.model_copy(update={'plan_id':second_id,'action_status':'success'}),now=6)[2].id==berries.id
+
+
+def test_generated_collectible_axe_can_be_approached_and_interacted_with_beyond_old_twenty_metre_limit(snapshot):
+    state=world(snapshot,drops=())
+    collectible={'id':'pickable:axe','name':'Каменный топор','kind':'interactable','category':'pickable',
+        'item_prefab':'AxeStone','produces':['AxeStone'],'distance':70,'interaction':'interact',
+        'position':{'x':70,'y':0,'z':0}}
+    state=Snapshot.model_validate({**state.model_dump(),'entities':[ *[entity.model_dump() for entity in state.entities],collectible],
+        'ground_scan_radius':128})
+    pool=TaskPool()
+    node=pool.apply_batch([TaskSpec(kind='collect',item_prefabs=['AxeStone'])])[0]
+    decision,_,selected=pool.next_decision(state,now=0)
+    assert selected is node and decision.action.value=='interact' and decision.target_id=='pickable:axe'
+    # A standing "along the leader's path" rule keeps its original short
+    # detour restriction even though loaded collectibles are visible farther.
+    pool.apply_batch([TaskSpec(kind='collect',item_prefabs=['AxeStone'],continuous=True,near_leader=True,max_distance=8)])
+    node.manual_paused=True
+    assert pool.next_decision(state,now=1)[0].action.value=='wait'
 
 
 def test_dependency_batch_references_are_remapped_to_persistent_ids(snapshot):
@@ -110,26 +281,47 @@ def test_replacement_cancels_old_pool_and_capacity_is_counted_after_replace():
     assert all(n.status=='cancelled' for n in old) and fresh[0].id not in {n.id for n in old}
 
 
-def test_nearby_follow_does_not_starve_opportunistic_collection_even_high_priority(snapshot):
+def test_model_high_follow_priority_is_honored_even_beside_the_leader(snapshot):
     pool=TaskPool(); tracking=follow().model_copy(update={'priority':90})
     nodes=pool.apply_batch([tracking,collect(continuous=True,near_leader=True,max_distance=8)])
     decision,lease,node=pool.next_decision(world(snapshot),now=0)
-    assert node.id==nodes[1].id and decision.action.value=='pickup'
+    assert node.id==nodes[0].id and decision.action.value=='follow'
     renewed,renewed_id,_=pool.next_decision(world(snapshot),now=1)
     assert renewed_id==lease and renewed.target_id==decision.target_id
     assert pool.revision==1  # Scheduling/progress does not invalidate UI edits.
 
 
-def test_leader_departure_pauses_collect_then_hysteresis_resumes_same_task(snapshot):
+def test_near_leader_geometry_pauses_collection_and_resumes_without_hidden_hysteresis(snapshot):
     pool=TaskPool(); nodes=pool.apply_batch([follow(),collect(continuous=True,near_leader=True,max_distance=8)])
     _,initial,node=pool.next_decision(world(snapshot),now=0)
     assert node.id==nodes[1].id
     result,_,node=pool.next_decision(world(snapshot,leader=20),now=1)
     assert result.action.value=='follow' and nodes[1].status=='paused'
-    result,_,_=pool.next_decision(world(snapshot,leader=10),now=2)
-    assert result.action.value=='follow'  # Catch-up does not oscillate at 14 m.
-    result,new_id,node=pool.next_decision(world(snapshot,leader=5),now=3)
+    result,new_id,node=pool.next_decision(world(snapshot,leader=11),now=2)
     assert result.action.value=='pickup' and node.id==nodes[1].id and new_id!=initial
+
+
+def test_model_priorities_are_never_capped_or_raised_by_task_kind_or_leader_distance(snapshot):
+    pool=TaskPool()
+    tracking,gathering=pool.apply_batch([
+        TaskSpec(kind='follow',priority=5),
+        TaskSpec(kind='collect',item_prefabs=['Raspberry'],continuous=True,priority=90),
+    ])
+    for stamp,distance in enumerate((3,20,60)):
+        decision,_,selected=pool.next_decision(world(snapshot,leader=distance),now=stamp)
+        assert selected is gathering and decision.action.value=='pickup'
+        assert tracking.priority==5 and gathering.priority==90
+        assert {row['id']:row['priority'] for row in pool.status()['tasks']}=={tracking.id:5,gathering.id:90}
+
+
+def test_duplicate_migration_keeps_canonical_model_priority_without_selecting_a_larger_one(tmp_path):
+    path=tmp_path/'old-pool.json'
+    nodes=[TaskNode(spec=TaskSpec(id='first',kind='collect',item_prefabs=['Raspberry'],continuous=True,priority=5)),
+           TaskNode(spec=TaskSpec(id='second',kind='collect',item_prefabs=['Raspberry'],continuous=True,priority=90))]
+    path.write_text(json.dumps({'version':1,'world_id':'world','revision':1,
+        'tasks':[node.model_dump(mode='json') for node in nodes],'receipts':{}}),encoding='utf-8')
+    pool=TaskPool.load(path,'world')
+    assert len(pool.tasks)==1 and pool.tasks[0].id=='first' and pool.tasks[0].priority==5
 
 
 @pytest.mark.parametrize('leader,drops',[(8,(("berry",-7,0),)),(3,(("berry",11,0),))])

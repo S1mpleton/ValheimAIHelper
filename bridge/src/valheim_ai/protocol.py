@@ -402,7 +402,8 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     elif decision.action == Action.USE:
         valid = decision.target_id in inventory and inventory[decision.target_id].usable
     elif decision.action == Action.INTERACT:
-        valid = target is not None and target.kind == "interactable" and target.distance <= 20
+        collectible = target is not None and target.category == "pickable" and bool(target.produces)
+        valid = target is not None and target.kind == "interactable" and target.distance <= (128 if collectible else 20)
     elif decision.action in (Action.DROP, Action.UNEQUIP):
         if decision.action == Action.DROP: validate_transfer(decision, snapshot)
         elif decision.target_id not in inventory: raise ValueError("Inventory item not observed")
@@ -434,7 +435,8 @@ def validate_decision(decision: Decision, snapshot: Snapshot) -> Decision:
     # Recompute range too: never trust only the sender's distance label.
     if target and decision.action != Action.FOLLOW:
         a, b = snapshot.actor.position, target.position
-        limit = 128 if decision.action == Action.PICKUP else 60 if decision.action == Action.GIVE else 20
+        collectible = decision.action == Action.INTERACT and target.category == "pickable" and bool(target.produces)
+        limit = 128 if decision.action == Action.PICKUP or collectible else 60 if decision.action == Action.GIVE else 20
         if math.dist((a.x, a.y, a.z), (b.x, b.y, b.z)) > limit:
             raise ValueError("Target is out of range")
     return decision

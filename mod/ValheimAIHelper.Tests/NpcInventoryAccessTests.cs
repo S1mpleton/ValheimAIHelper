@@ -5,6 +5,18 @@ namespace ValheimAIHelper.Tests;
 public class NpcInventoryAccessTests
 {
     [Theory]
+    [InlineData(true, false, false, 10, 3, true)]
+    [InlineData(false, true, false, 10, 10, true)]
+    [InlineData(false, false, false, 10, 3, false)]
+    [InlineData(true, true, false, 10, 3, false)]
+    [InlineData(false, true, true, 10, 3, false)]
+    [InlineData(true, false, false, 2, 3, false)]
+    [InlineData(true, false, false, 10, 0, false)]
+    [InlineData(true, false, false, 10, -1, false)]
+    public void TransferRejectsUnknownBagQuestAndChangedQuantity(bool human, bool npc, bool quest, int available, int amount, bool expected)
+        => Assert.Equal(expected, NpcInventoryAccess.MayTransfer(human, npc, quest, available, amount));
+
+    [Theory]
     [InlineData(true, true, false, false, false, true)]
     [InlineData(false, true, false, false, false, false)]
     [InlineData(true, false, false, false, false, false)]
