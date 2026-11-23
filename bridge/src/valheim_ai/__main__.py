@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="Valheim AI local bridge")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=Path(".local"))
+    parser.add_argument("--task-pool-dir", type=Path, help="Stable task storage; defaults to --data-dir/task-pools")
     parser.add_argument("--game-dir", type=Path, help="Pair the mod in this Valheim installation")
     parser.add_argument("--parent-pid", type=int, help="Exit when the owning Valheim process closes (bundled Windows service)")
     args = parser.parse_args()
@@ -46,7 +47,7 @@ def main():
     print("In Valheim: Esc -> Character control (or F8).")
     print("Optional diagnostic dashboard port:", args.port)
     print("API keys entered in the game or dashboard remain in memory until shutdown.")
-    uvicorn.run(create_app(token=token, data_dir=args.data_dir), host="127.0.0.1", port=args.port, access_log=False,
+    uvicorn.run(create_app(token=token, data_dir=args.data_dir, task_pool_dir=args.task_pool_dir), host="127.0.0.1", port=args.port, access_log=False,
                 loop="asyncio", http="h11", ws="none")
 
 

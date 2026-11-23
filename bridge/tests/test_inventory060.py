@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from test_ollama import app_client, cycle, plan, reply, start, MODEL
+from test_ollama import app_client, check_batch, cycle, plan, reply, start, MODEL
 from valheim_ai.local_schema import action_schema
 from valheim_ai.ollama import ModelSession
 from valheim_ai.performance import ollama_statistics
@@ -89,7 +89,7 @@ async def test_checking_different_model_does_not_automatically_reload_previous_a
     def handler(req):
         if req.url.path == "/api/show": return httpx.Response(200, json={})
         models.append(json.loads(req.content)["model"])
-        return reply(plan())
+        return reply(check_batch())
     async with app_client(handler) as (app, c):
         await start(c, snapshot)
         result = await c.post("/api/check/ollama", json={"model": "new:local"})

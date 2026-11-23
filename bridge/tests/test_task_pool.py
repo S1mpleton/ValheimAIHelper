@@ -155,7 +155,7 @@ def test_model_edit_cancels_only_requested_collection_and_keeps_other_work(snaps
     accepted=pool.apply_batch(TaskBatch(edits=[TaskEdit(action='cancel',task_id=berries.id)]),source_request='Не собирай больше малину')
     assert accepted==[] and berries.id not in pool.nodes
     assert set(pool.nodes)=={tracking.id,stones.id} and pool.history[-1].status=='cancelled'
-    assert pool.next_decision(world(snapshot),now=1)[0].action.value=='follow'
+    assert pool.next_decision(world(snapshot,leader=5),now=1)[0].action.value=='follow'
 
 
 def test_edit_and_new_tasks_commit_atomically_after_all_validation():
@@ -281,14 +281,98 @@ def test_replacement_cancels_old_pool_and_capacity_is_counted_after_replace():
     assert all(n.status=='cancelled' for n in old) and fresh[0].id not in {n.id for n in old}
 
 
-def test_model_high_follow_priority_is_honored_even_beside_the_leader(snapshot):
+def test_model_high_follow_priority_is_honored_while_movement_is_needed(snapshot):
     pool=TaskPool(); tracking=follow().model_copy(update={'priority':90})
     nodes=pool.apply_batch([tracking,collect(continuous=True,near_leader=True,max_distance=8)])
-    decision,lease,node=pool.next_decision(world(snapshot),now=0)
+    decision,lease,node=pool.next_decision(world(snapshot,leader=5),now=0)
     assert node.id==nodes[0].id and decision.action.value=='follow'
-    renewed,renewed_id,_=pool.next_decision(world(snapshot),now=1)
+    renewed,renewed_id,_=pool.next_decision(world(snapshot,leader=5),now=1)
     assert renewed_id==lease and renewed.target_id==decision.target_id
     assert pool.revision==1  # Scheduling/progress does not invalidate UI edits.
+
+
+def test_satisfied_high_priority_follow_yields_to_stone_then_resumes_without_changing_priorities(snapshot):
+    pool=TaskPool()
+    tracking,stones=pool.apply_batch([
+        TaskSpec(kind='follow',priority=90),
+        TaskSpec(kind='collect',item_prefabs=['Stone'],continuous=True,near_leader=True,priority=80),
+    ])
+    def observed(distance):
+        value=world(snapshot,leader=distance,drops=(('stone',1,0),))
+        value.entities[-1].item_prefab='Stone'
+        value.entities[-1].name='Камень'
+        return value
+    # At the leader's side the follow goal is satisfied, even though its model
+    # priority is higher. Its standing order remains present and continuous.
+    decision,_,node=pool.next_decision(observed(2),now=0)
+    assert decision.action.value=='pickup' and decision.target_id=='stone' and node is stones
+    assert tracking.status=='blocked' and tracking.reason=='Рядом с лидером; ожидаю движения'
+    # The native controller starts approach at 4m and keeps approaching in the
+    # middle band until it reaches the 2.5m stop boundary.
+    decision,lease,node=pool.next_decision(observed(4),now=1)
+    assert decision.action.value=='follow' and node is tracking
+    decision,same,node=pool.next_decision(observed(3),now=2)
+    assert decision.action.value=='follow' and node is tracking and same==lease
+    decision,_,node=pool.next_decision(observed(2.5),now=3)
+    assert decision.action.value=='pickup' and node is stones
+    decision,_,node=pool.next_decision(observed(3),now=4)
+    assert decision.action.value=='pickup' and node is stones
+    assert [(n.id,n.priority) for n in pool.tasks]==[(tracking.id,90),(stones.id,80)]
+    assert tracking.spec.continuous and pool.revision==1
+
+
+def test_follow_only_waits_in_hold_distance_and_uses_horizontal_hysteresis(snapshot):
+    pool=TaskPool(); tracking=pool.apply_batch([TaskSpec(kind='follow',priority=90)])[0]
+    for stamp,distance,expected in ((0,3,'wait'),(1,4,'follow'),(2,3,'follow'),(3,2.5,'wait'),(4,3,'wait')):
+        decision,_,_=pool.next_decision(world(snapshot,leader=distance,drops=()),now=stamp)
+        assert decision.action.value==expected
+    # 3m horizontally with a legal 1.2m height offset remains inside the hold
+    # band; 3D distance must not replace FollowController's horizontal metric.
+    state=world(snapshot,leader=3,drops=())
+    state.entities[0].position.y=1.2
+    assert pool.next_decision(state,now=5)[0].action.value=='wait'
+    state.entities[0].position.x=0
+    state.entities[0].position.z=4
+    assert pool.next_decision(state,now=6)[0].action.value=='follow'
+    assert tracking.priority==90 and tracking.id in pool.nodes
+
+
+@pytest.mark.parametrize('height,action',[(1.2,'wait'),(-1.2,'wait'),(1.2001,'follow'),(-1.2001,'follow')])
+def test_follow_readiness_resumes_on_a_different_floor_even_when_horizontally_near(snapshot,height,action):
+    pool=TaskPool(); pool.apply_batch([TaskSpec(kind='follow',priority=90)])
+    state=world(snapshot,leader=2,drops=())
+    state.entities[0].position.y=height
+    assert pool.next_decision(state,now=0)[0].action.value==action
+    state.entities[0].position.y=0
+    assert pool.next_decision(state,now=1)[0].action.value=='wait'
+
+
+def test_follow_readiness_state_is_not_persisted_and_resets_for_a_new_leader(snapshot,tmp_path):
+    pool=TaskPool(); pool.apply_batch([TaskSpec(kind='follow',priority=90)])
+    assert pool.next_decision(world(snapshot,leader=4,drops=()),now=0)[0].action.value=='follow'
+    state=world(snapshot,leader=3,drops=())
+    assert pool.next_decision(state,now=1)[0].action.value=='follow'
+    path=tmp_path/'tasks.json'; pool.save(path,'world')
+    restored=TaskPool.load(path,'world'); restored.control('resume')
+    assert restored.next_decision(state,now=2)[0].action.value=='wait'
+    state.leader_id=state.entities[0].id='new-leader'
+    assert pool.next_decision(state,now=2)[0].action.value=='wait'
+
+
+def test_follow_becoming_ready_cannot_preempt_unconfirmed_inventory_mutation(snapshot):
+    pool=TaskPool()
+    giving=pool.apply_batch([TaskSpec(kind='give',item_prefabs=['Raspberry'],amount=2,priority=20)])[0]
+    issued,lease,_=pool.next_decision(world(snapshot,leader=2,stock=3),now=0)
+    assert issued.action.value=='give'
+    tracking=pool.apply_batch([TaskSpec(kind='follow',priority=90)])[0]
+    kept,same,node=pool.next_decision(world(snapshot,leader=4,stock=3),now=1)
+    assert node is giving and same==lease and kept.action.value=='give' and kept.amount==2
+    acknowledged=world(snapshot,leader=4,stock=1).model_copy(update={
+        'plan_id':lease,'action_status':'success','action_completed_amount':2,
+    })
+    decision,_,node=pool.next_decision(acknowledged,now=2)
+    assert giving.status=='completed' and giving.completed_amount==2
+    assert node is tracking and decision.action.value=='follow' and tracking.priority==90
 
 
 def test_near_leader_geometry_pauses_collection_and_resumes_without_hidden_hysteresis(snapshot):
@@ -324,7 +408,7 @@ def test_duplicate_migration_keeps_canonical_model_priority_without_selecting_a_
     assert len(pool.tasks)==1 and pool.tasks[0].id=='first' and pool.tasks[0].priority==5
 
 
-@pytest.mark.parametrize('leader,drops',[(8,(("berry",-7,0),)),(3,(("berry",11,0),))])
+@pytest.mark.parametrize('leader,drops',[(8,(("berry",-7,0),)),(4,(("berry",11,0),))])
 def test_along_way_collection_cannot_use_large_model_radius_to_wander(snapshot,leader,drops):
     pool=TaskPool(); pool.apply_batch([follow(),collect(continuous=True,near_leader=True,max_distance=128)])
     decision,_,_=pool.next_decision(world(snapshot,leader=leader,drops=drops),now=0)
@@ -477,12 +561,12 @@ def test_game_pause_preserves_unacknowledged_transfer_identity(snapshot):
 
 def test_continuous_follow_does_not_expire_after_three_minutes(snapshot):
     pool=TaskPool(); node=pool.apply_batch([follow()])[0]
-    state=world(snapshot,drops=()); pool.next_decision(state,now=0)
+    state=world(snapshot,leader=5,drops=()); pool.next_decision(state,now=0)
     assert pool.next_decision(state,now=500)[0].action.value=='follow' and node.id in pool.nodes
 
 
 def test_follow_target_change_rebinds_native_lease(snapshot):
-    pool=TaskPool(); pool.apply_batch([follow()]); state=world(snapshot,drops=())
+    pool=TaskPool(); pool.apply_batch([follow()]); state=world(snapshot,leader=5,drops=())
     _,lease,_=pool.next_decision(state,now=0)
     state.leader_id='next'; state.entities[0].id='next'
     decision,fresh,_=pool.next_decision(state,now=1)
@@ -527,7 +611,7 @@ def test_new_request_cannot_implicitly_resume_restored_tasks(tmp_path,snapshot):
     loaded=TaskPool.load(path,'world')
     restored=loaded.get(old.id)
     loaded.unpause()
-    state=world(snapshot,drops=())
+    state=world(snapshot,leader=5,drops=())
     assert loaded.next_decision(state,now=0)[0].action.value=='wait'
     new=loaded.apply_batch([follow()])[0]
     loaded.unpause()

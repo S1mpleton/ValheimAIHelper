@@ -12,7 +12,7 @@ import uuid
 from typing import Literal
 
 import httpx
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from .item_intent import ItemIntent, bulk_review_request, intent_request, prefab_of, _tokens, _score
 from .protocol import StrictModel, validate_decision
@@ -21,6 +21,119 @@ from .providers import (
     gemini_generation_config, network_error_message, request_api, strict_schema,
 )
 from .task_pool import TaskBatch
+from .task_schema import task_batch_schema
+
+
+class TaskProposalError(ProviderInvalidAction, ValueError):
+    """An invalid field in model data, rather than an implementation failure."""
+
+    def __init__(self, path, reason):
+        self.path, self.reason = path, reason
+        super().__init__(f"{path}: {reason}")
+
+
+def task_validation_feedback(error):
+    """Bounded field-level feedback, without Pydantic's echoed input/secrets."""
+    if isinstance(error, ValidationError):
+        rows = []
+        for entry in error.errors(include_input=False, include_context=False, include_url=False)[:5]:
+            path = "$" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in entry["loc"])
+            reason = entry["msg"]
+            # Coherence validators attach to the task object; identify the
+            # relevant field instead of hiding the useful cause in ValueError.
+            if "Collection needs" in reason or "Transfer needs" in reason: path += ".item_prefabs"
+            elif "Only an atomic task" in reason or "Atomic task needs" in reason: path += ".action"
+            elif "Goal needs" in reason: path += ".objective"
+            elif "priority edit" in reason: path += ".priority"
+            rows.append(f"{path}: {reason}")
+        return "; ".join(rows)
+    if isinstance(error, json.JSONDecodeError):
+        return f"$: invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
+    return str(error)[:1000]
+
+
+def _task_body(raw):
+    if not isinstance(raw, str) or not raw.strip():
+        raise TaskProposalError("$", "expected a non-empty JSON object")
+    body = json.loads(raw)
+    if not isinstance(body, dict): raise TaskProposalError("$", "expected a TaskBatch object")
+    queries = body.pop("catalog_queries", [])
+    if not isinstance(queries, list) or len(queries) > 3:
+        raise TaskProposalError("$.catalog_queries", "expected an array of at most 3 search strings")
+    for index, query in enumerate(queries):
+        if not isinstance(query, str) or not query.strip() or len(query) > 120:
+            raise TaskProposalError(f"$.catalog_queries[{index}]", "expected a non-empty string of at most 120 characters")
+    if queries and (body.get("tasks") or body.get("edits") or set(body) - set(TaskBatch.model_fields)):
+        raise TaskProposalError("$.catalog_queries", "Запрос словаря нельзя смешивать с действиями или изменениями задач")
+    return body, queries
+
+
+def _validate_new_dependencies(batch, existing):
+    """Reject impossible model edges; never rewrite the model's graph."""
+    rows = {row["id"]: row for row in _existing_view(existing)} if batch.mode == "append" else {}
+    rows.update({task.id: task.model_dump() for task in batch.tasks})
+    positions = {task.id: index for index, task in enumerate(batch.tasks)}
+    for task in batch.tasks:
+        for dependency in task.depends_on:
+            path = f"$.tasks[{positions[task.id]}].depends_on"
+            if dependency not in rows:
+                raise TaskProposalError(path, f"unknown dependency {dependency!r}")
+            if rows[dependency].get("continuous") or rows[dependency]["kind"] == "follow":
+                raise TaskProposalError(path, "a continuous prerequisite can never complete; choose parallel tasks or a finite prerequisite yourself")
+    visiting, visited = set(), set()
+    def visit(task_id):
+        if task_id in visiting:
+            raise TaskProposalError("$.tasks[*].depends_on", "task dependencies contain a cycle")
+        if task_id in visited or task_id not in rows: return
+        visiting.add(task_id)
+        for dependency in rows[task_id].get("depends_on", []): visit(dependency)
+        visiting.remove(task_id)
+        visited.add(task_id)
+    for task in batch.tasks: visit(task.id)
+
+
+def _cloud_task_text(response, provider, redact):
+    """Validate the provider envelope separately from the model's TaskBatch.
+
+    Bad HTTP-200 envelopes are upstream failures, not task syntax mistakes.
+    Deliberate checks avoid hiding a compiler KeyError/TypeError as model data.
+    """
+    def fail(path):
+        error = ProviderUnavailable(f"{provider}: API вернул некорректный ответ ({path}). Повторите запрос позже.")
+        error.diagnostic = redact(response.text)[:1200]
+        raise error
+    try:
+        body = response.json()
+    except (ValueError, UnicodeError):
+        fail("$: expected JSON")
+    if not isinstance(body, dict): fail("$: expected object")
+    if provider == "openai":
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices: fail("$.choices: expected non-empty array")
+        first = choices[0]
+        if not isinstance(first, dict): fail("$.choices[0]: expected object")
+        message = first.get("message")
+        if not isinstance(message, dict): fail("$.choices[0].message: expected object")
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip(): fail("$.choices[0].message.content: expected text")
+        return content
+    candidates = body.get("candidates")
+    if not isinstance(candidates, list) or not candidates: fail("$.candidates: expected non-empty array")
+    candidate = candidates[0]
+    if not isinstance(candidate, dict): fail("$.candidates[0]: expected object")
+    content = candidate.get("content")
+    if not isinstance(content, dict): fail("$.candidates[0].content: expected object")
+    parts = content.get("parts")
+    if not isinstance(parts, list): fail("$.candidates[0].content.parts: expected array")
+    texts = []
+    for index, part in enumerate(parts):
+        if not isinstance(part, dict): fail(f"$.candidates[0].content.parts[{index}]: expected object")
+        if part.get("thought"): continue
+        if not isinstance(part.get("text"), str): fail(f"$.candidates[0].content.parts[{index}].text: expected text")
+        texts.append(part["text"])
+    result = "".join(texts)
+    if not result.strip(): fail("$.candidates[0].content.parts: expected non-empty answer")
+    return result
 
 
 class TransferSpec(StrictModel):
@@ -72,6 +185,13 @@ def transfer_signature(transfers):
 
 def _value(obj, name, default=None):
     return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
+
+
+def _compact_facts(obj, fields, required=()):
+    # Keep observed zero counts/tiers and False permissions: they constrain
+    # actions. Empty optional labels/arrays carry no additional world fact.
+    return {key: _value(obj, key) for key in fields
+            if key in required or _value(obj, key) not in (None, "", [])}
 
 
 def _existing_view(existing_tasks):
@@ -128,35 +248,11 @@ def task_request(objective, snapshot, *, chat=(), existing_tasks=(), provider="o
     identity = batch_id or uuid.uuid4().hex[:10]
     new_ids = [f"task_{identity}_{n}" for n in range(1, 16)]
     existing_ids = [t["id"] for t in existing]
-    schema = strict_schema(TaskBatch) if provider != "ollama" else TaskBatch.model_json_schema()
-    action_node = schema.get("$defs", {}).get("Action")
-    if action_node is not None:
-        supported = {"wait", *snapshot.supported_actions} - {"follow", "pickup", "give", "drop"}
-        action_node["enum"] = [action for action in action_node["enum"] if action in supported]
-    spec = schema.get("$defs", {}).get("TaskSpec")
-    if spec is not None:
-        props = spec["properties"]
-        props["id"] = {"type": "string", "enum": new_ids}
-        props["depends_on"]["items"] = {"type": "string", "enum": [*existing_ids, *new_ids]}
-        names = [entry["item_prefab"] for entry in candidates]
-        if names:
-            props["item_prefabs"]["items"] = {"type": "string", "enum": names}
-        else:
-            props["item_prefabs"]["maxItems"] = 0
-    edit_spec = schema.get("$defs", {}).get("TaskEdit")
-    if edit_spec is not None:
-        if existing_ids: edit_spec["properties"]["task_id"] = {"type":"string", "enum":existing_ids}
-        else: schema["properties"]["edits"]["maxItems"] = 0
-    schema["properties"]["catalog_queries"] = {"type":"array", "items":{"type":"string", "minLength":1, "maxLength":120}, "maxItems":3, "default":[]}
-    if provider != "ollama": schema.setdefault("required", []).append("catalog_queries")
-    # Explicit model priorities are part of the planning contract for every
-    # provider. Native constructors keep a neutral default for legacy callers.
-    required = schema["$defs"]["TaskSpec"].setdefault("required", [])
-    if "priority" not in required: required.append("priority")
+    schema = task_batch_schema(snapshot, candidates, new_ids, existing_ids, provider)
     inventory_fields = ("id", "name", "item_prefab", "item_key", "count", "equipped", "quest", "food", "skill", "tool_tier", "durability")
-    inventory = [{key: _value(item, key) for key in inventory_fields if _value(item, key) is not None} for item in snapshot.actor.inventory]
+    inventory = [_compact_facts(item, inventory_fields, ("id", "name", "count")) for item in snapshot.actor.inventory]
     entity_fields = ("id", "name", "kind", "category", "item_prefab", "produces", "count", "distance", "interaction", "required_tool", "tool_tier", "pickup_allowed")
-    entities = [{**{key: _value(entity, key) for key in entity_fields if _value(entity, key) is not None},
+    entities = [{**_compact_facts(entity, entity_fields, ("id", "name", "kind", "distance")),
                  "position": entity.position.model_dump()} for entity in snapshot.entities]
     facts = {
         "latest_request": objective,
@@ -196,35 +292,40 @@ def parse_tasks(raw, snapshot, candidates=None, *, existing_tasks=(), new_task_i
         # Omitted defaults in compact local output must not turn defence back
         # on after the user previously asked to avoid fighting.
         batch = batch.model_copy(update={"combat_policy": combat_policy})
-    if require_priority and any("priority" not in task.model_fields_set for task in batch.tasks):
-        raise ProviderInvalidAction("Модель не указала приоритет новой задачи. План не принят; прежняя работа сохранена.")
-    known = {entry.item_prefab for entry in snapshot.item_catalog}
+    if require_priority:
+        for index, task in enumerate(batch.tasks):
+            if "priority" not in task.model_fields_set:
+                raise TaskProposalError(f"$.tasks[{index}].priority", "Модель не указала приоритет новой задачи; требуется целое число 0..90")
+    known = {entry.item_prefab for entry in snapshot.item_catalog} if candidates is None else set()
     known.update(prefab_of(item, snapshot) for item in [*snapshot.actor.inventory, *snapshot.entities, *snapshot.container_inventory])
     known.update(prefab for entity in snapshot.entities for prefab in entity.produces)
     if candidates is not None:
         known.update(entry["item_prefab"] for entry in candidates)
     ids = [task.id for task in batch.tasks]
     if len(ids) != len(set(ids)):
-        raise ValueError("Task IDs must be unique within the proposal")
+        raise TaskProposalError("$.tasks[*].id", "Task IDs must be unique within the proposal")
     existing = _existing_view(existing_tasks)
     existing_ids = {t["id"] for t in existing}
-    for edit in batch.edits:
-        if edit.task_id not in existing_ids: raise ValueError("An edit must refer to an existing task")
+    for index, edit in enumerate(batch.edits):
+        if edit.task_id not in existing_ids: raise TaskProposalError(f"$.edits[{index}].task_id", "An edit must refer to an existing task")
     if any(task_id in existing_ids for task_id in ids):
-        raise ValueError("A new task must not overwrite an existing task ID")
+        raise TaskProposalError("$.tasks[*].id", "A new task must not overwrite an existing task ID")
     if new_task_ids is not None and any(task_id not in new_task_ids for task_id in ids):
         # A task may omit its id and receive the model's default UUID; those IDs
         # are safe but cannot be used as a model-generated dependency reference.
         requested = json.loads(raw) if isinstance(raw, (str, bytes)) else raw if isinstance(raw, dict) else None
-        if requested is not None and any(t.get("id") not in new_task_ids for t in requested["tasks"] if "id" in t):
-            raise ValueError("Task ID is not one of the offered new IDs")
-    for task in batch.tasks:
+        if requested is not None and any(t.get("id") not in new_task_ids for t in requested.get("tasks", []) if "id" in t):
+            raise TaskProposalError("$.tasks[*].id", "Task ID is not one of the offered new IDs")
+    for index, task in enumerate(batch.tasks):
         if any(prefab not in known for prefab in task.item_prefabs):
-            raise ValueError("Task names an item type outside the game catalog")
+            raise TaskProposalError(f"$.tasks[{index}].item_prefabs", "Task names an item type outside the game catalog")
         if task.kind in ("collect", "give", "drop"):
             ItemIntent(goal=task.kind, item_prefabs=task.item_prefabs, amount=task.amount, selection=task.selection)
         if task.action is not None:
-            validate_decision(task.action, snapshot)
+            try:
+                validate_decision(task.action, snapshot)
+            except ValueError as exc:
+                raise TaskProposalError(f"$.tasks[{index}].action", str(exc)) from None
     return batch
 
 
@@ -237,7 +338,7 @@ def _pool_tasks(state):
 
 
 async def compile_tasks(state, objective, snapshot, chat=()):
-    """Make one bounded model request, record it, and return a typed proposal."""
+    """Compile transactionally, allowing one model-authored format repair."""
     provider, model, base = state.provider, state.model, state.ollama_url
     key = state.keys.get(provider, "")
     current = asyncio.current_task()
@@ -267,7 +368,7 @@ async def compile_tasks(state, objective, snapshot, chat=()):
                 exchange.set("request", payload)
                 response = await request_api(state.client_for(provider), "POST", "https://api.openai.com/v1/chat/completions",
                                              headers={"Authorization": "Bearer " + key}, json=payload)
-                return response.json()["choices"][0]["message"]["content"]
+                return _cloud_task_text(response, provider, lambda text: state.dialogue.redact(text, key))
             if provider == "gemini":
                 config = gemini_generation_config(model, schema)
                 config["maxOutputTokens"] = max_tokens
@@ -276,24 +377,46 @@ async def compile_tasks(state, objective, snapshot, chat=()):
                 exchange.set("request", payload)
                 response = await request_api(state.client_for(provider), "POST", f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                              headers={"x-goog-api-key": key}, json=payload)
-                return "".join(part.get("text", "") for part in response.json()["candidates"][0]["content"]["parts"] if not part.get("thought"))
+                return _cloud_task_text(response, provider, lambda text: state.dialogue.redact(text, key))
             raise ProviderError("Для разбора задач выберите провайдера и модель.")
 
-        lookup_passes = 0
+        lookup_passes, repair_used = 0, False
         while True:
-            raw = await asyncio.wait_for(generate(messages, schema, trace), max(.001, deadline - time.monotonic()))
-            if not isinstance(raw, str) or not raw.strip(): raise ValueError("Task compiler returned empty text")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError()
+            raw = await asyncio.wait_for(generate(messages, schema, trace), remaining)
             trace.set("response", raw)
-            body = json.loads(raw)
-            if not isinstance(body, dict): raise ValueError("Task proposal must be an object")
-            queries = body.pop("catalog_queries", [])
-            if not isinstance(queries, list) or len(queries) > 3 or any(not isinstance(q, str) or not q.strip() or len(q) > 120 for q in queries):
-                raise ProviderInvalidAction("Модель вернула недопустимый запрос словаря. Прежняя работа сохранена.")
-            if not queries:
-                raw = body
-                break
-            if body.get("tasks") or body.get("edits") or set(body) - set(TaskBatch.model_fields):
-                raise ProviderInvalidAction("Запрос словаря нельзя смешивать с действиями или изменениями задач. Прежняя работа сохранена.")
+            try:
+                body, queries = _task_body(raw)
+                if repair_used and queries:
+                    raise TaskProposalError("$.catalog_queries", "a format repair must return final tasks/edits; another lookup is not allowed")
+                if not queries:
+                    batch = parse_tasks(body, snapshot, request["candidates"], existing_tasks=existing,
+                                        new_task_ids=request["new_task_ids"], combat_policy=current_combat, require_priority=True)
+                    _validate_new_dependencies(batch, existing)
+                    break
+            except (ValidationError, json.JSONDecodeError, TaskProposalError) as exc:
+                feedback = state.dialogue.redact(task_validation_feedback(exc), key)
+                excerpt = state.dialogue.redact(raw if isinstance(raw, str) else repr(raw), key)[:1200]
+                result_text = f"Недопустимый набор задач: {feedback}\nКороткий ответ модели: {excerpt}"
+                if repair_used:
+                    failure = ProviderInvalidAction("Модель повторно вернула недопустимые задачи. " + feedback + ". Прежний пул сохранён.")
+                    failure.diagnostic = result_text
+                    raise failure from None
+                repair_used = True
+                trace.finish("error", result_text + "\nЗапрошено одно исправление формата; задачи не применялись.")
+                trace = state.dialogue.begin(provider, model, "tasks-repair", key)
+                # Preserve the original instruction, exact game context, IDs,
+                # lookup results and model priorities. Only the model repairs
+                # its output. Gemini also receives the feedback in its single
+                # user content, instead of losing extra chat messages.
+                facts = json.loads(messages[1]["content"])
+                facts["format_repair"] = {"validation_errors": feedback, "invalid_response": excerpt,
+                    "instruction": "Верни один исправленный TaskBatch для исходного latest_request. Сам выбери приоритеты и зависимости. Не повторяй запрос словаря; catalog_queries=[]. Не расширяй объём передачи и не выдавай выполнение за факт."}
+                messages = [messages[0], {"role": "user", "content": json.dumps(facts, ensure_ascii=False)}]
+                schema = deepcopy(schema)
+                schema["properties"]["catalog_queries"]["maxItems"] = 0
+                continue
             if lookup_passes >= 2:
                 raise ProviderInvalidAction("Модель исчерпала два обращения к словарю. Уточните название предмета; прежняя работа сохранена.")
             lookup_trace = state.dialogue.begin(provider, model, "catalog-lookup", key)
@@ -318,7 +441,6 @@ async def compile_tasks(state, objective, snapshot, chat=()):
             facts["catalog_lookup_results"] = lookup_results
             request["messages"][1]["content"] = json.dumps(facts, ensure_ascii=False)
             messages, schema = request["messages"], request["format"]
-        batch = parse_tasks(raw, snapshot, request["candidates"], existing_tasks=existing, new_task_ids=request["new_task_ids"], combat_policy=current_combat, require_priority=True)
         if any(task.selection == "all_inventory" or
                task.action is not None and task.action.selection == "all_inventory" for task in batch.tasks):
             # A previous local model expanded "five stones" to the whole bag.
@@ -390,9 +512,6 @@ async def compile_tasks(state, objective, snapshot, chat=()):
     except httpx.RequestError as exc:
         result_text = network_error_message(exc)
         raise ProviderUnavailable(result_text) from None
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
-        result_text = "Модель вернула недопустимый набор задач: " + type(exc).__name__
-        raise ProviderInvalidAction("Модель не смогла разбить поручение на допустимые задачи. Предыдущий пул сохранён.") from None
     finally:
         trace.finish(status, result_text)
         state.inference_tasks.discard(current)

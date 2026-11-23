@@ -40,9 +40,11 @@ def task_properties(schema, kind="follow"):
 
 
 def model_task(schema, kind, index=0, **fields):
-    task = dict(kind=kind, item_prefabs=[], amount=1, selection="exact",
+    defaults = dict(kind=kind, item_prefabs=[], amount=1, selection="exact",
                 continuous=kind == "follow", near_leader=False, objective="", priority=30 if kind == "follow" else 60 if kind == "collect" else 75)
-    if "id" in task_properties(schema): task["id"] = task_properties(schema)["id"]["enum"][index]
+    props = task_properties(schema, kind)
+    task = {key: value for key, value in defaults.items() if key in props}
+    if "id" in props: task["id"] = props["id"]["enum"][index]
     task.update(fields)
     return task
 
@@ -66,19 +68,20 @@ def test_request_exposes_observed_types_and_editable_jobs_as_data(snapshot):
     assert "Raspberry" in {i["item_prefab"] for i in payload["item_type_catalog"]}
     assert "AxeStone" not in {i["item_prefab"] for i in payload["item_type_catalog"]}
     assert request["format"]["properties"]["tasks"]["maxItems"] == 15
-    assert request["format"]["$defs"]["TaskEdit"]["properties"]["task_id"]["enum"] == ["earlier"]
+    assert all(branch["properties"]["task_id"]["enum"] == ["earlier"]
+               for branch in request["format"]["$defs"]["TaskEdit"]["anyOf"])
 
 
 @pytest.mark.parametrize("provider", ["ollama", "openai", "gemini"])
 def test_full_planner_has_required_model_priority_and_optional_native_ids(snapshot, provider):
     request = task_request("Собери камни, затем сделай инструмент", world(snapshot), provider=provider)
     spec = request["format"]["$defs"]["TaskSpec"]
-    props = spec["properties"]
-    assert {"kind", "priority", "depends_on", "action", "objective", "item_prefabs"}.issubset(props)
-    assert "priority" in spec["required"]
-    if provider == "ollama": assert "id" not in spec["required"]
-    assert spec["additionalProperties"] is False
-    assert {"follow", "collect", "give", "drop", "action", "goal"} == set(props["kind"]["enum"])
+    variants = spec["anyOf"]
+    assert {"kind", "priority", "depends_on", "action", "objective"}.issubset(variants[0]["properties"])
+    assert all("priority" in branch["required"] for branch in variants)
+    if provider == "ollama": assert all("id" not in branch["required"] for branch in variants)
+    assert all(branch["additionalProperties"] is False for branch in variants)
+    assert {"follow", "collect", "give", "drop", "action", "goal"} == {branch["properties"]["kind"]["const"] for branch in variants}
     raw = {"tasks":[{"kind":"collect", "item_prefabs":["Stone"], "priority":19}]}
     assert parse_tasks(raw, world(snapshot), require_priority=True).tasks[0].priority == 19
     raw["tasks"][0].pop("priority")
@@ -109,19 +112,38 @@ def test_live_request_contains_no_copyable_demo_or_old_mission_title(snapshot):
     assert "format_examples_not_additional_requests" not in facts
 
 
+def test_compact_observations_keep_item_identity_pickables_and_negative_permissions(snapshot):
+    observed = world(snapshot)
+    observed.entities[-1] = observed.entities[-1].model_copy(update={
+        "item_prefab": "Stone", "count": 0, "pickup_allowed": False, "tool_tier": 0})
+    observed.entities.append(observed.entities[-1].model_copy(update={
+        "id": "pickable", "kind": "resource", "name": "Малина", "item_prefab": "",
+        "produces": ["Raspberry"], "interaction": "pick", "required_tool": "Axe"}))
+    request = task_request("Собирай предметы", observed)
+    facts = json.loads(request["messages"][1]["content"])
+    drop, pickable = facts["observed_entities"][-2:]
+    assert drop["item_prefab"] == "Stone" and drop["count"] == 0
+    assert drop["pickup_allowed"] is False and drop["tool_tier"] == 0
+    assert "produces" not in drop and "required_tool" not in drop
+    assert "item_prefab" not in pickable and pickable["produces"] == ["Raspberry"]
+    assert pickable["required_tool"] == "Axe" and pickable["interaction"] == "pick"
+    assert {"id", "name", "kind", "distance", "position"}.issubset(drop)
+    assert {entry["item_prefab"] for entry in facts["item_type_catalog"]} == {entry["item_prefab"] for entry in request["candidates"]}
+
+
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
-def test_cloud_strict_schema_keeps_flat_required_object(provider, snapshot):
+def test_cloud_strict_schema_requires_all_variant_object_fields(provider, snapshot):
     schema = task_request("Пошли", world(snapshot), provider=provider)["format"]
     spec = schema["$defs"]["TaskSpec"]
-    assert "anyOf" not in spec and set(spec["required"]) == set(spec["properties"])
-    assert spec["additionalProperties"] is False
+    assert "anyOf" in spec
+    assert all(set(branch["required"]) == set(branch["properties"]) for branch in spec["anyOf"])
+    assert all(branch["additionalProperties"] is False for branch in spec["anyOf"])
 
 
 def test_empty_catalog_requires_clarification_instead_of_unknown_collection(snapshot):
     observed = Snapshot.model_validate({**snapshot, "leader_id": "", "entities": [], "actor": {**snapshot["actor"], "inventory": []}})
     request = task_request("Подбери неясный предмет", observed)
-    props = task_properties(request["format"])
-    assert props["item_prefabs"]["maxItems"] == 0
+    assert "collect" not in {branch["properties"]["kind"]["const"] for branch in request["format"]["$defs"]["TaskSpec"]["anyOf"]}
     with pytest.raises(ValueError): parse_tasks({"tasks":[{"kind":"collect", "item_prefabs":[]}]}, observed)
     with pytest.raises(ValueError): parse_tasks({"tasks":[{"kind":"collect", "item_prefabs":["Fake"]}]}, observed)
     assert len(request["messages"]) == 2
@@ -308,6 +330,203 @@ async def test_compiler_timeout_releases_inference_tracking(snapshot):
         assert not state.inference_tasks and not state.task_pool.tasks
 
 
+def task_response(provider, value):
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    if provider == "ollama": return httpx.Response(200, json={"done": True, "message": {"content": text}})
+    if provider == "openai": return httpx.Response(200, json={"choices": [{"message": {"content": text}}]})
+    return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}}]})
+
+
+def task_wire(request, provider):
+    body = json.loads(request.content)
+    if provider == "ollama": return body["format"], json.loads(body["messages"][1]["content"])
+    if provider == "openai": return body["response_format"]["json_schema"]["schema"], json.loads(body["messages"][1]["content"])
+    return body["generationConfig"]["responseJsonSchema"], json.loads(body["contents"][0]["parts"][0]["text"])
+
+
+def task_metadata(request):
+    if request.url.path == "/api/ps": return httpx.Response(200, json={"models": []})
+    if request.url.path == "/api/show": return httpx.Response(200, json={"capabilities": ["completion"]})
+    return None
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "gemini"])
+async def test_081_legacy_empty_collect_gets_one_model_authored_repair_in_original_context(snapshot, provider):
+    calls = []
+    objective = "Иди за мной и собирай камни по пути"
+    def handler(request):
+        metadata = task_metadata(request)
+        if metadata is not None: return metadata
+        schema, facts = task_wire(request, provider)
+        calls.append(facts)
+        if len(calls) == 1:
+            # Exact failure shape from probe081_full_final_gemma: copied follow
+            # tasks plus collect without items, valid JSON that flat grammar
+            # accepted until TaskSpec.coherent rejected the whole response.
+            ids = facts["new_task_ids"]
+            tasks = [{"kind": "follow", "priority": 30, "id": ids[0], "action": None},
+                     {"kind": "collect", "priority": 60, "id": ids[1], "action": None}]
+            tasks.extend({"kind": "follow", "priority": 60, "id": task_id, "action": None} for task_id in ids[2:])
+            return task_response(provider, {"tasks": tasks})
+        assert facts["latest_request"] == objective and facts["new_task_ids"] == calls[0]["new_task_ids"]
+        assert facts["observed_entities"] == calls[0]["observed_entities"]
+        assert facts["item_type_catalog"] == calls[0]["item_type_catalog"]
+        assert "$.tasks[1].item_prefabs" in facts["format_repair"]["validation_errors"]
+        assert schema["properties"]["catalog_queries"]["maxItems"] == 0
+        return task_response(provider, {"tasks": [
+            model_task(schema, "follow", priority=11),
+            model_task(schema, "collect", index=1, item_prefabs=["Stone"], priority=47, continuous=True, near_leader=True),
+        ]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client, provider)
+        state.task_pool.apply_batch([TaskSpec(id="native_job", kind="follow", priority=8)])
+        before = [task.model_dump() for task in state.task_pool.tasks]
+        batch = await compile_tasks(state, objective, world(snapshot))
+        assert [task.priority for task in batch.tasks] == [11, 47]
+        assert batch.tasks[1].item_prefabs == ["Stone"] and batch.tasks[1].depends_on == []
+        assert len(calls) == 2 and [task.model_dump() for task in state.task_pool.tasks] == before
+        assert [(entry.purpose, entry.status) for entry in state.dialogue.records.values()] == [("tasks", "error"), ("tasks-repair", "ok")]
+        assert not state.inference_tasks
+
+
+async def test_repair_asks_model_for_priority_zero_without_native_default(snapshot):
+    calls = []
+    def handler(request):
+        metadata = task_metadata(request)
+        if metadata is not None: return metadata
+        schema, facts = task_wire(request, "ollama")
+        calls.append(facts)
+        if len(calls) == 1: return task_response("ollama", {"tasks": [{"kind": "follow"}]})
+        assert "$.tasks[0].priority" in facts["format_repair"]["validation_errors"]
+        return task_response("ollama", {"tasks": [{"kind": "follow", "priority": 0}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client)
+        batch = await compile_tasks(state, "Следуй", world(snapshot))
+        assert len(calls) == 2 and batch.tasks[0].priority == 0
+
+
+async def test_dependency_repair_changes_only_when_model_returns_corrected_graph(snapshot):
+    calls = []
+    def handler(request):
+        metadata = task_metadata(request)
+        if metadata is not None: return metadata
+        schema, facts = task_wire(request, "ollama")
+        calls.append(facts)
+        ids = facts["new_task_ids"]
+        if len(calls) == 2:
+            assert "continuous prerequisite" in facts["format_repair"]["validation_errors"]
+            assert "$.tasks[1].depends_on" in facts["format_repair"]["validation_errors"]
+        return task_response("ollama", {"tasks": [
+            model_task(schema, "follow", priority=31),
+            model_task(schema, "collect", index=1, item_prefabs=["Stone"], priority=72,
+                       continuous=True, depends_on=[ids[0]] if len(calls) == 1 else []),
+        ]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client)
+        batch = await compile_tasks(state, "Следуй и собирай камни", world(snapshot))
+        assert len(calls) == 2 and [task.priority for task in batch.tasks] == [31, 72]
+        assert batch.tasks[1].depends_on == [] and not state.task_pool.tasks
+
+
+@pytest.mark.parametrize("bad_task", [
+    {"kind": "collect", "priority": 22, "item_prefabs": []},
+    {"kind": "follow", "priority": 22, "action": {"action": "wait", "target_id": "", "duration": 1, "say": ""}},
+    {"kind": "follow"},
+])
+async def test_second_invalid_shape_is_rejected_with_precise_redacted_diagnostic(snapshot, bad_task):
+    calls = []
+    def handler(request):
+        metadata = task_metadata(request)
+        if metadata is not None: return metadata
+        calls.append(request)
+        return task_response("ollama", {"tasks": [{**bad_task, "title": "cloud-openai-secret"}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client)
+        state.task_pool.apply_batch([TaskSpec(id="kept", kind="follow", priority=13)])
+        before = [task.model_dump() for task in state.task_pool.tasks]
+        with pytest.raises(ProviderInvalidAction) as raised:
+            await compile_tasks(state, "Новое поручение", world(snapshot))
+        assert len(calls) == 2 and "$.tasks[0]" in raised.value.diagnostic
+        assert "cloud-openai-secret" not in raised.value.diagnostic
+        assert "[REDACTED]" in raised.value.diagnostic and "Короткий ответ модели" in raised.value.diagnostic
+        assert [task.model_dump() for task in state.task_pool.tasks] == before and not state.inference_tasks
+
+
+async def test_repair_spends_remaining_original_deadline(snapshot, monkeypatch):
+    import valheim_ai.task_compiler as compiler
+    clock = iter((100., 100., 109.99))
+    monkeypatch.setattr(compiler, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    calls = []
+    async def handler(request):
+        metadata = task_metadata(request)
+        if metadata is not None: return metadata
+        calls.append(request)
+        if len(calls) == 1: return task_response("ollama", {"tasks": [{"kind": "collect", "priority": 22}]})
+        await asyncio.Event().wait()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client)
+        with pytest.raises(ProviderUnavailable, match="Время разбора"):
+            await compile_tasks(state, "Собирай камни", world(snapshot))
+        assert len(calls) == 2 and not state.inference_tasks and not state.task_pool.tasks
+        assert list(state.dialogue.records.values())[-1].status == "error"
+
+
+async def test_cancel_during_repair_leaves_pool_and_tracking_unchanged(snapshot):
+    entered = asyncio.Event()
+    calls = []
+    async def handler(request):
+        metadata = task_metadata(request)
+        if metadata is not None: return metadata
+        calls.append(request)
+        if len(calls) == 1: return task_response("ollama", {"tasks": [{"kind": "follow"}]})
+        entered.set()
+        await asyncio.Event().wait()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client)
+        state.task_pool.apply_batch([TaskSpec(id="kept", kind="follow", priority=7)])
+        before = [task.model_dump() for task in state.task_pool.tasks]
+        running = asyncio.create_task(compile_tasks(state, "Иди за мной", world(snapshot)))
+        await asyncio.wait_for(entered.wait(), 1)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError): await running
+        assert len(calls) == 2 and not state.inference_tasks
+        assert [task.model_dump() for task in state.task_pool.tasks] == before
+        assert list(state.dialogue.records.values())[-1].status == "cancelled"
+
+
+@pytest.mark.parametrize("bug", [KeyError("compiler bug"), TypeError("compiler bug")])
+async def test_compiler_implementation_failures_are_not_relabelled_as_bad_model_output(snapshot, monkeypatch, bug):
+    import valheim_ai.task_compiler as compiler
+    def broken(*args, **kwargs): raise bug
+    monkeypatch.setattr(compiler, "task_request", broken)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500))) as client:
+        state = state_for(client)
+        with pytest.raises(type(bug), match="compiler bug"):
+            await compile_tasks(state, "Следуй", world(snapshot))
+        assert not state.inference_tasks
+
+
+@pytest.mark.parametrize("provider,envelope", [
+    ("openai", {}), ("openai", {"choices": []}), ("openai", {"choices": [None]}),
+    ("openai", {"choices": [{}]}), ("openai", {"choices": [{"message": {"content": []}}]}),
+    ("gemini", {}), ("gemini", {"candidates": []}), ("gemini", {"candidates": [None]}),
+    ("gemini", {"candidates": [{}]}), ("gemini", {"candidates": [{"content": {"parts": [1]}}]}),
+])
+async def test_malformed_cloud_success_envelope_is_upstream_failure_without_format_repair(snapshot, provider, envelope):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={**envelope, "debug": "cloud-openai-secret cloud-gemini-secret"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        state = state_for(client, provider)
+        with pytest.raises(ProviderUnavailable, match="API вернул некорректный ответ") as raised:
+            await compile_tasks(state, "Следуй", world(snapshot))
+        assert len(calls) == 1 and not state.inference_tasks
+        assert "cloud-openai-secret" not in raised.value.diagnostic and "cloud-gemini-secret" not in raised.value.diagnostic
+        assert "[REDACTED]" in raised.value.diagnostic
+        assert len(state.dialogue.records) == 1 and not state.task_pool.tasks
+
+
 @pytest.mark.parametrize("provider", ["ollama", "openai", "gemini"])
 @pytest.mark.parametrize("confirmed", [False, True])
 async def test_whole_bag_scope_is_independently_confirmed_for_every_provider(snapshot, provider, confirmed):
@@ -376,7 +595,7 @@ async def test_wrapped_atomic_whole_bag_action_is_rejected_before_scope_review(s
         state = state_for(client)
         with pytest.raises(ProviderInvalidAction, match="допустимые задачи"):
             await compile_tasks(state, "Дай мне пять камней", world(snapshot))
-        assert calls == [False] and not state.task_pool.tasks
+        assert calls == [False, False] and not state.task_pool.tasks
 
 
 async def test_truthy_string_is_not_a_whole_inventory_confirmation(snapshot):
@@ -463,7 +682,7 @@ def test_cancel_only_proposal_removes_requested_job_and_preserves_follow(snapsho
     following, berries = pool.apply_batch([TaskSpec(kind="follow"),
         TaskSpec(kind="collect", item_prefabs=["Raspberry"], continuous=True)], snapshot=observed)
     request = task_request("Больше не собирай малину", observed, existing_tasks=pool.tasks, provider=provider)
-    allowed = request["format"]["$defs"]["TaskEdit"]["properties"]["task_id"]["enum"]
+    allowed = request["format"]["$defs"]["TaskEdit"]["anyOf"][0]["properties"]["task_id"]["enum"]
     assert set(allowed) == {following.id, berries.id}
     edit = {"action":"cancel", "task_id":berries.id}
     batch = parse_tasks({"tasks":[], "edits":[edit]}, observed, existing_tasks=pool.tasks)

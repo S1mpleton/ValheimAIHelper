@@ -26,6 +26,8 @@ from .diagnostics import validation_diagnostics
 from . import __version__
 from .planning import Planner
 from .task_runtime import TaskRuntime
+from .task_storage import migrate_legacy_task_pools
+from .model_check import check_snapshot, check_task_planner
 from .chat_intent import classify_chat
 from .task_policy import companion_duty
 
@@ -347,7 +349,8 @@ def load_token(data_dir: Path) -> str:
 
 
 def create_app(token: str | None = None, client: httpx.AsyncClient | None = None,
-               ollama_client: httpx.AsyncClient | None = None, data_dir: Path | None = None) -> FastAPI:
+               ollama_client: httpx.AsyncClient | None = None, data_dir: Path | None = None,
+               task_pool_dir: Path | None = None) -> FastAPI:
     owned_client = client is None
     client = client or httpx.AsyncClient(
         timeout=httpx.Timeout(API_TIMEOUT, connect=5), follow_redirects=False,
@@ -355,7 +358,12 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
     )
     token = token or load_token(Path(os.environ.get("VALHEIM_AI_DATA_DIR", ".local")))
     state = State(token, client, ollama_client)
-    if data_dir is not None: state.tasks.storage = Path(data_dir) / "task-pools"
+    if task_pool_dir is not None:
+        state.tasks.storage = Path(task_pool_dir)
+        for message in migrate_legacy_task_pools(state.tasks.storage).messages():
+            state.event("task-storage", message)
+    elif data_dir is not None:
+        state.tasks.storage = Path(data_dir) / "task-pools"
 
     @asynccontextmanager
     async def lifespan(app):
@@ -572,11 +580,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise HTTPException(409, "Введите API-ключ или примените его в настройках")
         # Explicit operator-triggered check uses the exact production adapter and schema,
         # but no game observations or control state. The result is never sent to the mod.
-        probe = Snapshot(
-            session_id="api-check", sequence=1, supported_actions=["wait"],
-            actor={"id": "api-check", "name": "API check", "position": {"x": 0, "y": 0, "z": 0},
-                   "health": 1, "max_health": 1, "stamina": 0},
-        )
+        probe = check_snapshot().model_copy(update={"supported_actions": ["wait"]})
         if state.check_task is not None or state.switch_task is not None: raise HTTPException(409, "Предыдущая проверка/смена модели ещё выполняется. Стоп/F9 отменяет её.")
         if provider == "ollama" and state.command.mode == "ai" and (state.provider, state.model, state.ollama_url) != (provider, settings.model, base):
             state.command = state.command.model_copy(update={"mode": "stop"})
@@ -586,17 +590,11 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             state.event("bridge", "Проверка другой модели Ollama: AI остановлен, чтобы прежняя модель не загрузилась снова. После проверки сохраните подключение и включите AI.")
         revision = state.revision
         async def perform_check():
+            checks = []
             if provider == "gemini":
-                return await diagnose_gemini(state.client, settings.model, key, probe)
-            elif provider == "ollama":
-                await state.infer(provider, settings.model, "",
-                    "Проверка подключения. Верни план из единственного действия wait, target_id='', duration=1, say='Связь работает'.",
-                    probe, planning=True, base=base, purpose="check")
-                return ["Ollama: локальная модель доступна", "JSON-план игровых действий: OK"]
-            else:
-                await state.infer(provider, settings.model, key,
-                             "Проверка API. Верни wait, пустой target_id, duration=1 и короткое say.", probe, purpose="check")
-                return ["Формат действий: OK"]
+                checks = await diagnose_gemini(state.client, settings.model, key, probe)
+            checks.extend(await check_task_planner(state, provider, settings.model, key, base))
+            return checks
         state.planner.interrupt_planning()
         state.cancel_chat()
         task = asyncio.create_task(perform_check())
@@ -608,7 +606,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             raise
         except (ProviderError, TimeoutError) as exc:
             message = str(exc) if isinstance(exc, ProviderError) else "Время ожидания API истекло"
-            if provider == "openai" and isinstance(exc, ProviderError) and exc.diagnostic:
+            if isinstance(exc, ProviderError) and exc.diagnostic:
                 message += " Ответ API: " + exc.diagnostic
             raise HTTPException(502, message) from None
         finally:

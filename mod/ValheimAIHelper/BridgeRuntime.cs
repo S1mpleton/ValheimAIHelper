@@ -25,15 +25,19 @@ internal sealed class BridgeRuntime : IDisposable
         string executable = Path.Combine(pluginDirectory, "runtime", "ValheimAIBridge.exe");
         if (!File.Exists(executable))
             throw new FileNotFoundException("Не найден runtime/ValheimAIBridge.exe. Установите полный Windows-архив из Releases, включая папку runtime.");
-        string data = Path.Combine(configDirectory, "ValheimAIHelper", "runtime-" + Process.GetCurrentProcess().Id);
+        string helperData = Path.Combine(configDirectory, "ValheimAIHelper");
+        string data = Path.Combine(helperData, "runtime-" + Process.GetCurrentProcess().Id);
+        string taskPools = Path.Combine(helperData, "task-pools");
         Directory.CreateDirectory(data);
+        Directory.CreateDirectory(taskPools);
         byte[] bytes = new byte[32]; using (var random = RandomNumberGenerator.Create()) random.GetBytes(bytes);
         Token = Convert.ToBase64String(bytes);
         File.WriteAllText(Path.Combine(data, "bridge-token"), Token + "\n");
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start(); int port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
         Url = "http://127.0.0.1:" + port;
-        var info = new ProcessStartInfo(executable, "--port " + port + " --data-dir " + Quote(data) + " --parent-pid " + Process.GetCurrentProcess().Id)
+        var info = new ProcessStartInfo(executable, "--port " + port + " --data-dir " + Quote(data) +
+            " --task-pool-dir " + Quote(taskPools) + " --parent-pid " + Process.GetCurrentProcess().Id)
         {
             WorkingDirectory = pluginDirectory, UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true,

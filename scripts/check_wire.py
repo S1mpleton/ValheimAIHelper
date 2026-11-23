@@ -33,9 +33,7 @@ async def main():
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "gpt-6-luna"}]})
         if b"api-check" in request.content:
-            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
-                "action": "wait", "target_id": "", "duration": 1, "say": "Связь работает"
-            })}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"mode":"append", "combat_policy":"defend", "tasks":[{"kind":"follow", "priority":31}, {"kind":"collect", "priority":72, "item_prefabs":["Stone"], "continuous":True, "near_leader":True}], "edits":[]})}}]})
         if b"wire-extended" in request.content:
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"steps": [{
                 "action":"drop", "target_id":"inventory:stones", "amount":5, "duration":1, "say":"Выбрасываю пять камней"
@@ -57,6 +55,8 @@ async def main():
         if request.url.path=="/api/show": return httpx.Response(200,json={"capabilities":["completion"],"thinking":{"values":[False]}})
         body=json.loads(request.content)
         assert body["think"] is False and body["stream"] is False
+        if "tasks" in body["format"]["properties"]:
+            return httpx.Response(200,json={"message":{"content":json.dumps({"mode":"append", "combat_policy":"defend", "tasks":[{"kind":"follow", "priority":31}, {"kind":"collect", "priority":72, "item_prefabs":["Stone"], "continuous":True, "near_leader":True}], "edits":[]})},"done":True})
         probe=body["format"]["$defs"]["Action"]["enum"]==["wait"]
         step={"action":"wait","target_id":"","duration":1,"say":"Проверка"} if probe else {"action":"drop","target_id":"inventory:stones","amount":5,"duration":1,"say":"Пять камней"}
         text=json.dumps(body["messages"],ensure_ascii=False)

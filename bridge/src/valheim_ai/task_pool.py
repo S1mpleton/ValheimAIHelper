@@ -138,6 +138,10 @@ class TaskPool:
         self._receipts: dict[str, str] = {}
         self._turn = 0
         self._served: dict[str, int] = {}
+        # Volatile readiness, matching the native FollowController hysteresis.
+        # A satisfied standing follow order must not occupy the executor while
+        # the NPC is already beside the leader. AI priorities stay unchanged.
+        self._follow_motion: dict[str, tuple[str, bool]] = {}
         self.migration_note = ""
 
     @property
@@ -159,6 +163,7 @@ class TaskPool:
         node.status, node.reason = status, reason[:240]
         self.nodes.pop(node.id, None)
         self._served.pop(node.id, None)
+        self._follow_motion.pop(node.id, None)
         self.history.append(node)
         self._receipts[node.id] = status
         if self.active_id == node.id: self.active_id = ""
@@ -414,6 +419,20 @@ class TaskPool:
             groups[group] = groups.get(group, 0) + item.count
         return next((i for i in items if node.spec.selection != "exact" or groups[i.item_key or i.id] >= node.spec.amount), None)
 
+    def _follow_ready(self, node, snapshot, leader):
+        if leader is None or "follow" not in snapshot.supported_actions:
+            self._follow_motion.pop(node.id, None)
+            return False, "Лидер не виден или следование не поддерживается"
+        previous_leader, following = self._follow_motion.get(node.id, (leader.id, False))
+        if previous_leader != leader.id: following = False
+        actor, target = snapshot.actor.position, leader.position
+        horizontal = math.hypot(target.x - actor.x, target.z - actor.z)
+        same_floor = abs(target.y - actor.y) <= 1.2
+        if same_floor and horizontal <= 2.5: following = False
+        elif not same_floor or horizontal >= 4: following = True
+        self._follow_motion[node.id] = (leader.id, following)
+        return following, "" if following else "Рядом с лидером; ожидаю движения"
+
     def _ready(self, node, snapshot, now):
         if node.manual_paused: return False, "Приостановлено игроком"
         if node.needs_refresh: return False, "После загрузки нужна проверка цели или неподтверждённой операции; дайте новое поручение"
@@ -421,7 +440,7 @@ class TaskPool:
         if any(d not in done for d in node.spec.depends_on): return False, "Ожидаю завершения предыдущей задачи"
         if node.retry_at > now: return False, "Пауза после отказа игры"
         leader = self._leader(snapshot)
-        if node.kind == "follow": return bool(leader) and "follow" in snapshot.supported_actions, "Лидер не виден или следование не поддерживается"
+        if node.kind == "follow": return self._follow_ready(node, snapshot, leader)
         if self._outside_leader_scope(node, snapshot): return False, "Нет цели в заданных границах рядом с лидером"
         if node.kind == "collect":
             if snapshot.actor.encumbered: return False, "Сумка перегружена"

@@ -18,6 +18,14 @@ def plan(action="wait", target="", **extra):
     return {"steps": [{"action":action,"target_id":target,"duration":1,"say":"Готово",**extra}]}
 
 
+def check_batch(follow_priority=31, collect_priority=72):
+    return {"mode":"append", "combat_policy":"defend", "tasks":[
+        {"kind":"follow", "priority":follow_priority},
+        {"kind":"collect", "priority":collect_priority, "item_prefabs":["Stone"],
+         "continuous":True, "near_leader":True},
+    ], "edits":[]}
+
+
 def reply(value):
     return httpx.Response(200,json={"done":True,"message":{"content":json.dumps(value),"thinking":"not an instruction"}})
 
@@ -82,7 +90,7 @@ async def test_models_require_pairing_but_not_a_key_and_exclude_cloud_models():
         assert result.json()=={"models":[MODEL]}
 
 
-async def test_check_uses_production_plan_schema_and_no_game_data_or_cloud_credentials():
+async def test_check_uses_production_task_schema_and_no_game_data_or_cloud_credentials():
     seen=[]
     def handler(req):
         seen.append(req)
@@ -90,12 +98,20 @@ async def test_check_uses_production_plan_schema_and_no_game_data_or_cloud_crede
         assert all(secret not in req.content.decode() for secret in ("secret-openai","secret-google","must-not-forward"))
         if req.url.path=="/api/show": return httpx.Response(200,json={"capabilities":["completion"],"thinking":{"values":[True,False]}})
         body=json.loads(req.content)
-        assert body["format"]["properties"]["steps"] and body["format"]["$defs"]["Action"]["enum"]==["wait"]
-        assert all("amount" in v["required"] for v in body["format"]["$defs"]["Decision"]["anyOf"])
-        assert "chat_intent" in body["format"]["required"]
+        schema=body["format"]
+        assert "tasks" in schema["properties"] and "steps" not in schema["properties"]
+        variants=schema["$defs"]["TaskSpec"]["anyOf"]
+        assert all("priority" in v["required"] for v in variants)
+        collect=[v for v in variants if v["properties"]["kind"].get("const")=="collect"]
+        assert collect and all("item_prefabs" in v["required"] for v in collect)
+        assert all(v["properties"]["item_prefabs"]["items"]["enum"]==["Stone"] for v in collect)
+        facts=json.loads(body["messages"][1]["content"])
+        assert facts["existing_tasks"]==[] and facts["npc"]["inventory"]==[]
+        assert facts["human_leader_id"]=="api-check-leader"
+        assert {e["id"] for e in facts["observed_entities"]}=={"api-check-leader","api-check-stone"}
         assert body["stream"] is False and body["think"] is False and body["options"]["temperature"]==0
         assert any("api-check" in m["content"] for m in body["messages"])
-        return reply(plan())
+        return reply(check_batch())
     async with app_client(handler) as (app,client):
         result=await client.post("/api/check/ollama",json={"model":MODEL,"api_key":"must-not-forward"})
         assert result.status_code==200 and result.json()["ok"]

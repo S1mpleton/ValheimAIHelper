@@ -24,11 +24,21 @@ internal static partial class NpcInventoryWindow
     internal static void MarkUseAttempt() => useFrame = Time.frameCount;
     internal static void Notify(string text)
     {
+        string failure = "HUD недоступен";
         try
         {
-            if (Player.m_localPlayer) NativeMethods.Call(Player.m_localPlayer, "Message", MessageHud.MessageType.Center, text, 0, null);
+            if (Player.m_localPlayer && NativeNotification.TryShow(Player.m_localPlayer, "Message", MessageHud.MessageType.Center, text, out failure)) return;
+            // A local HUD is sufficient even if Player.Message changed or is
+            // temporarily unavailable. Resolve its singleton without binding a
+            // game-version-specific getter into this notification path.
+            var type = typeof(MessageHud);
+            var hud = UiReflection.Property(type, "instance")?.GetValue(null, null)
+                ?? UiReflection.Field(type, "instance")?.GetValue(null)
+                ?? UiReflection.Field(type, "m_instance")?.GetValue(null);
+            if (hud != null && NativeNotification.TryShow(hud, "ShowMessage", MessageHud.MessageType.Center, text, out failure)) return;
         }
-        catch (Exception ex) { Plugin.NpcInventoryLog("Сообщение об обмене недоступно: " + ex.GetType().Name); }
+        catch (Exception ex) { failure = ex.GetType().Name; }
+        Plugin.NpcInventoryLog(text + " (сообщение HUD недоступно: " + failure + ")");
     }
 
     internal static void Initialize(Harmony harmony)

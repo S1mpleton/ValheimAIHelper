@@ -19,7 +19,8 @@ def task_world(snapshot):
                  supported_actions=["wait", "speak", "follow", "pickup", "interact", "give", "drop"])
     value["actor"]["inventory"] = []
     value["entities"] = [
-        dict(id="leader", name="Человек", kind="player", distance=3, position=dict(x=3, y=0, z=0)),
+        # Movement tests start outside the native follow restart distance.
+        dict(id="leader", name="Человек", kind="player", distance=5, position=dict(x=5, y=0, z=0)),
         dict(id="berry", name="Малина", kind="item", item_prefab="Raspberry", count=3,
              distance=2, position=dict(x=2, y=0, z=0)),
     ]
@@ -104,6 +105,35 @@ async def test_compound_request_compiles_once_and_native_scheduler_catches_up_th
     assert returned["action"] == "follow"
     assert next(n for n in state.tasks.pool.tasks if n.kind == "collect").count == 3
     assert len(calls) == 1
+
+
+async def test_high_priority_follow_yields_to_collect_when_already_near_and_resumes_when_far(task_client, snapshot, monkeypatch):
+    state, client = task_client
+    observed = task_world(snapshot)
+    observed["entities"][0].update(distance=2, position=dict(x=2, y=0, z=0))
+    async def compiler(*_):
+        return TaskBatch(tasks=[TaskSpec(kind="follow", priority=90),
+            TaskSpec(kind="collect", item_prefabs=["Raspberry"], continuous=True, near_leader=True, priority=80)])
+    monkeypatch.setattr("valheim_ai.task_runtime.compile_tasks", compiler)
+    await connect(client, observed)
+    await client.post("/api/command", json={"mode":"ai", "objective":"Следуй и собирай малину по пути"})
+    await poll(client, observed)
+    await finish_model(state)
+    gathering = await poll(client, observed)
+    assert gathering["action"] == "pickup" and gathering["target_id"] == "berry"
+    assert {node.kind:node.priority for node in state.tasks.pool.tasks} == {"follow":90, "collect":80}
+    # Confirm the pickup before asking a movement task to take over its lease.
+    observed["actor"]["inventory"] = [dict(id="bag:berries", name="Малина", item_prefab="Raspberry", count=3, equipped=False, food=True, equipable=False)]
+    observed["entities"].pop()
+    observed["entities"][0].update(distance=5, position=dict(x=5, y=0, z=0))
+    following = await poll(client, observed, plan_id=gathering["plan_id"], action_status="success", action_completed_amount=3)
+    assert following["action"] == "follow"
+    # Approaching the leader does not complete/cancel the standing follow task.
+    observed["entities"][0].update(distance=2, position=dict(x=2, y=0, z=0))
+    idle = await poll(client, observed, plan_id=following["plan_id"], action_status="running")
+    assert idle["action"] == "wait"
+    assert {node.kind:node.priority for node in state.tasks.pool.tasks} == {"follow":90, "collect":80}
+    assert not state.tasks.pool.history
 
 
 async def test_collect_then_give_dependency_waits_for_actual_inventory_and_give_receipt(task_client, snapshot, monkeypatch):

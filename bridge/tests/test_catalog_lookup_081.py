@@ -126,7 +126,7 @@ async def test_lookup_cannot_be_mixed_with_new_work(snapshot, provider):
         before = saved_pool(state)
         with pytest.raises(ProviderInvalidAction, match="нельзя смешивать"):
             await compile_tasks(state, "Найди топор", world(snapshot))
-        assert len(calls) == 1 and saved_pool(state) == before and not state.inference_tasks
+        assert len(calls) == 2 and saved_pool(state) == before and not state.inference_tasks
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)

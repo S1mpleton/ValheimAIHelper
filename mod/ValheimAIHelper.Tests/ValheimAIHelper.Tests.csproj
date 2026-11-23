@@ -39,6 +39,7 @@
     <Compile Include="../ValheimAIHelper/UiSelection.cs" Link="UiSelection.cs" />
     <Compile Include="../ValheimAIHelper/Capabilities.cs" Link="Capabilities.cs" />
     <Compile Include="../ValheimAIHelper/NativeMethods.cs" Link="NativeMethods.cs" />
+    <Compile Include="../ValheimAIHelper/NativeNotification.cs" Link="NativeNotification.cs" />
     <Compile Include="../ValheimAIHelper/UiLayout.cs" Link="UiLayout.cs" />
     <Compile Include="../ValheimAIHelper/ChatControlPolicy.cs" Link="ChatControlPolicy.cs" />
     <Compile Include="../ValheimAIHelper/AiProviders.cs" Link="AiProviders.cs" />

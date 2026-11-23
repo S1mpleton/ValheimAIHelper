@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from valheim_ai.app import create_app, load_token
+from test_ollama import check_batch
 
 
 TOKEN = "test-pairing-code-long-enough-for-tests"
@@ -343,8 +344,11 @@ async def test_gemini_check_uses_typed_model_and_does_not_change_control():
             assert request.url.path.endswith("/models/probe-model")
             return httpx.Response(200, json={"supportedGenerationMethods": ["generateContent"]})
         assert request.url.path.endswith("/models/probe-model:generateContent")
-        if "responseJsonSchema" in json.loads(request.content)["generationConfig"]:
+        config=json.loads(request.content)["generationConfig"]
+        if "responseJsonSchema" in config:
             assert b'api-check' in request.content
+            if "tasks" in config["responseJsonSchema"].get("properties", {}):
+                return httpx.Response(200, json={"candidates":[{"content":{"parts":[{"text":json.dumps(check_batch())}]}}]})
         return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps({
             "action": "wait", "target_id": "", "duration": 1, "say": "OK"
         })}]}}]})
@@ -355,8 +359,8 @@ async def test_gemini_check_uses_typed_model_and_does_not_change_control():
             assert (await c.post("/api/check/gemini", headers=AUTH, json={"model": "probe-model"})).status_code == 409
             result = await c.post("/api/check/gemini", headers=AUTH, json={"model": "probe-model", "api_key": "temporary-key"})
             assert result.json()["ok"] is True and result.json()["model"] == "probe-model"
-            assert result.json()["checks"] == ["Карточка модели: OK", "Простая генерация: OK", "Формат действий: OK"]
-            assert len(calls) == 3
+            assert result.json()["checks"] == ["Карточка модели: OK", "Простая генерация: OK", "Формат действий: OK", "Формат пула задач: OK", "Следование и сбор: OK"]
+            assert len(calls) == 4
             assert app.state.bridge.keys["gemini"] == ""
             assert app.state.bridge.provider == "offline"
             assert app.state.bridge.command.mode == "stop"
@@ -424,9 +428,7 @@ async def test_openai_in_game_setup_check_and_unknown_provider_are_safe():
         calls.append(request)
         if request.method == 'GET':
             return httpx.Response(200, json={'data': [{'id': 'gpt-6-luna'}]})
-        return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps({
-            'action': 'wait', 'target_id': '', 'duration': 1, 'say': 'Связь работает'
-        })}}]})
+        return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(check_batch())}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as upstream:
         app = create_app(token=TOKEN, client=upstream)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost', headers=AUTH) as c:

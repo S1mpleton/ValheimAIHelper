@@ -41,6 +41,35 @@ def cloud_model(name: str, metadata: dict | None = None) -> bool:
     return name.lower().endswith((":cloud", "-cloud")) or bool(data.get("remote_host") or data.get("remote_model"))
 
 
+def _error_detail(response: httpx.Response) -> str:
+    """Keep the server's explanation, bounded and safe for logs/local UI."""
+    try:
+        data = response.json()
+        detail = data.get("error", "") if isinstance(data, dict) else ""
+        if isinstance(detail, dict): detail = detail.get("message", "")
+    except (ValueError, UnicodeError):
+        detail = response.text
+    if not isinstance(detail, str): return ""
+    # Local Ollama needs no credential, but an upstream error can echo configuration.
+    detail = re.sub(r"(?:sk-|AQ\.|AIza)[A-Za-z0-9_-]{20,}", "[REDACTED]", detail)
+    detail = re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", detail)
+    detail = re.sub(r"https?://\S+", "[URL]", detail)
+    detail = re.sub(r"(?i)(api[_-]?key|access_token|token|key)\s*[=:]\s*[^\s,;]+", r"\1=[REDACTED]", detail)
+    return " ".join("".join(c if c.isprintable() else " " for c in detail).split())[:600]
+
+
+def _thinking_rejected(detail: str) -> bool:
+    """Recognize an explicit parameter rejection, not an incidental 'think'."""
+    patterns = (
+        r"\b(?:does not|doesn't|do not|cannot|can't)\s+support\s+(?:the\s+)?(?:thinking|['\"]?think['\"]?(?:\s+(?:parameter|option|field))?)\b",
+        r"\b(?:unknown|unrecognized|unsupported|invalid)\s+(?:parameter|option|field)\s*[:=]?\s*['\"]?think\b",
+        r"\b(?:parameter|option|field)\s+['\"]?think['\"]?\s+(?:is\s+)?(?:unsupported|not supported|not recognized|unknown)\b",
+        r"\b(?:thinking|think)\s+(?:value\s+)?['\"]?false['\"]?\s+(?:is\s+)?(?:unsupported|not supported|not allowed)\b",
+        r"\b(?:cannot|can't|does not|doesn't)\s+(?:disable|turn off)\s+thinking\b",
+    )
+    return any(re.search(pattern, detail, re.IGNORECASE) for pattern in patterns)
+
+
 async def request(client: httpx.AsyncClient, base: str, method: str, path: str, *, payload=None, timeout=15):
     try:
         response = await asyncio.wait_for(client.request(method, local_url(base) + path, json=payload,
@@ -49,21 +78,25 @@ async def request(client: httpx.AsyncClient, base: str, method: str, path: str, 
         raise ProviderUnavailable("Ollama не запущена или недоступна по локальному адресу. Запустите Ollama и проверьте адрес.") from None
     except (httpx.RequestError, TimeoutError):
         raise ProviderUnavailable("Ollama не ответила вовремя. Первая загрузка модели может занять несколько минут; проверьте память и выберите меньшую модель.") from None
-    if response.status_code == 404:
-        raise ProviderModelNotFound("Ollama: модель не установлена или API недоступен (404). Проверьте имя в ollama list и версию Ollama.")
-    if response.status_code == 503:
-        raise ProviderUnavailable("Ollama занята (503). Повтор после паузы.")
     if response.is_redirect:
-        raise ProviderLocalConfigurationError("Ollama: перенаправление не поддерживается. Укажите прямой локальный адрес.")
+        raise ProviderLocalConfigurationError(f"Ollama: перенаправление (HTTP {response.status_code}) не поддерживается. Укажите прямой локальный адрес.")
     if response.is_error:
-        try:
-            detail = response.json().get("error", "")
-        except (ValueError, AttributeError): detail = ""
-        if isinstance(detail, str) and any(s in detail.lower() for s in ("memory", "out of memory", "cuda", "vram")):
-            raise ProviderLocalConfigurationError("Ollama: не хватает памяти для модели/контекста. Выберите меньшую текстовую модель и закройте лишние приложения.")
-        if isinstance(detail, str) and "think" in detail.lower():
-            raise ProviderLocalConfigurationError("Ollama: эта модель не поддерживает отключение размышлений (think=false). Выберите модель с отключаемым reasoning.")
-        raise ProviderLocalConfigurationError(f"Ollama отклонила запрос (HTTP {response.status_code}). Нужна локальная текстовая модель с поддержкой JSON; проверьте версию Ollama и модель.")
+        detail = _error_detail(response)
+        status = f"HTTP {response.status_code}"
+        if response.status_code == 404:
+            error = ProviderModelNotFound(f"Ollama: модель не установлена или API недоступен ({status}). Проверьте имя в ollama list и версию Ollama.")
+        elif response.status_code == 503:
+            error = ProviderUnavailable(f"Ollama занята ({status}). Повтор после паузы.")
+        elif any(s in detail.lower() for s in ("memory", "out of memory", "cuda", "vram")):
+            error = ProviderLocalConfigurationError(f"Ollama: ошибка памяти/устройства модели ({status}). Выберите меньшую текстовую модель и проверьте память/GPU.")
+        elif (response.status_code in (400, 422) and method.upper() == "POST"
+                and path in ("/api/chat", "/api/generate") and isinstance(payload, dict)
+                and payload.get("think") is False and _thinking_rejected(detail)):
+            error = ProviderLocalConfigurationError(f"Ollama отклонила отключение размышлений think=false ({status}). Обновите Ollama или выберите модель с поддержкой отключения размышлений.")
+        else:
+            error = ProviderLocalConfigurationError(f"Ollama отклонила запрос ({status}). Проверьте ответ Ollama, версию сервера и настройки модели.")
+        error.diagnostic = detail
+        raise error
     try:
         data = response.json()
         if not isinstance(data, dict) or data.get("error"): raise ValueError()
@@ -97,11 +130,11 @@ async def model_info(client: httpx.AsyncClient, base: str, model: str) -> dict:
 
 def thinking_option(info: dict):
     values = info.get("thinking", {}).get("values") if isinstance(info.get("thinking"), dict) else None
-    if isinstance(values, list):
+    if isinstance(values, list) and values:
         if any(v is False for v in values): return False
         raise ProviderLocalConfigurationError("Ollama: эта модель не поддерживает отключение размышлений (think=false). Выберите модель с отключаемым reasoning.")
     family = info.get("details", {}).get("family", "") if isinstance(info.get("details"), dict) else ""
-    if family in ("gptoss", "gpt-oss"):
+    if isinstance(family, str) and family.lower() in ("gptoss", "gpt-oss"):
         raise ProviderLocalConfigurationError("Ollama: у этой модели обязательные размышления. Нужна модель с поддержкой think=false.")
     return False
 
