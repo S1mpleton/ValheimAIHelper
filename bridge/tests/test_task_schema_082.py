@@ -24,6 +24,8 @@ def complete(node, value, root):
         if isinstance(value, dict) and "kind" in value:
             options = [branch for branch in options if branch["properties"]["kind"]["const"] == value["kind"]]
             options = [branch for branch in options if branch["properties"].get("selection", {}).get("const", "exact") == value.get("selection", "exact")]
+        elif isinstance(value, dict) and isinstance(value.get("action"), str):
+            options = [branch for branch in options if branch["properties"].get("action", {}).get("const") == value["action"]]
         elif value is None:
             options = [branch for branch in options if branch.get("type") == "null"]
         return complete(options[0], value, root)
@@ -131,7 +133,8 @@ def test_numeric_grammar_uses_legal_duration_and_model_priority_enums(snapshot, 
     existing = [TaskSpec(id="native_existing", kind="follow", priority=29)]
     schema = task_request("Достань факел", observed, provider=provider, existing_tasks=existing)["format"]
     durations = [.25, .5, .75, 1, 1.5, 2, 2.5, 3]
-    assert schema["$defs"]["Decision"]["properties"]["duration"]["enum"] == durations
+    assert all(branch["properties"]["duration"]["enum"] == durations
+               for branch in schema["$defs"]["Decision"]["anyOf"])
     assert all(branch["properties"]["priority"]["enum"] == list(range(91))
                for branch in schema["$defs"]["TaskSpec"]["anyOf"])
     edit = next(branch for branch in schema["$defs"]["TaskEdit"]["anyOf"] if branch["properties"]["action"]["const"] == "priority")

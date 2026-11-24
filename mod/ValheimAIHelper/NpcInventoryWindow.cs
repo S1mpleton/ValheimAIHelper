@@ -72,7 +72,10 @@ internal static partial class NpcInventoryWindow
             npc.gameObject.AddComponent<NpcInventoryInteraction>();
     }
 
-    internal static bool IsOpenFor(Player npc) => npc && current && current!.Npc == npc && current.InUse;
+    // The native SetInUse flag can be cleared before its GUI finishes closing
+    // or while a compatibility adapter is replaced. Hold the motor gate until
+    // our session is actually closed, not until that transient flag changes.
+    internal static bool IsOpenFor(Player npc) => npc && current && current!.Npc == npc;
 
     internal static void RequestOpen(Player npc)
     {
@@ -91,8 +94,8 @@ internal static partial class NpcInventoryWindow
             Plugin.NpcInventoryLog("Проверяю доступ к сумке NPC.");
             if (!CanOpen(npc, out error)) return false;
             Close();
-            // Stop/cancel the executor before exposing the bag to human input.
-            // It stays stopped when the window is closed; no surprise resumption.
+            // Temporarily gate input before exposing the bag to human input.
+            // Keep the running session/lease, so closing can continue its work.
             beforeOpen();
             prepared = true;
             NativeMethods.Call(npc, "ClearActionQueue");
@@ -233,7 +236,18 @@ internal static partial class NpcInventoryWindow
             Plugin.NpcInventoryLog("Штатное окно не стало видимым; открываю резервный обмен.");
             BeginFallback(current); return;
         }
-        if (!visible || NativeAccess.Read(InventoryGui.instance, "m_currentContainer") as Container != current.Container)
+        var shownContainer = NativeAccess.Read(InventoryGui.instance, "m_currentContainer") as Container;
+        if (visible && !shownContainer)
+        {
+            // Some game versions clear the inert adapter immediately after
+            // Show. The visible native grid is no longer a valid NPC session:
+            // replace it with the real-bag fallback instead of dropping the gate.
+            Plugin.NpcInventoryLog("Штатное окно потеряло адаптер NPC; открываю резервный обмен.");
+            NativeMethods.Call(InventoryGui.instance, "Hide");
+            BeginFallback(current);
+            return;
+        }
+        if (!visible || shownContainer != current.Container)
         {
             Plugin.NpcInventoryLog(!InventoryGui.IsVisible() ? "Окно инвентаря закрыто игроком / игрой." : "Открыт другой инвентарь; обмен с NPC закрыт.");
             Close();
@@ -245,6 +259,7 @@ internal static partial class NpcInventoryWindow
         requested = null;
         var proxy = current;
         current = null;
+        NpcArmorIndicator.Clear();
         RestoreEquippedColors();
         if (!proxy) return;
         proxy!.InUse = false;
@@ -279,7 +294,11 @@ internal static partial class NpcInventoryWindow
                     proxy.Npc.GetComponent<CompanionNpc>().Save();
             }
             catch (Exception ex) { Plugin.NpcError(ex); }
-            finally { UnityEngine.Object.Destroy(proxy.gameObject); }
+            finally
+            {
+                if (proxy.Npc) Plugin.NpcInventoryClosed(proxy.Npc);
+                UnityEngine.Object.Destroy(proxy.gameObject);
+            }
         }
     }
 
@@ -289,6 +308,7 @@ internal static partial class NpcInventoryWindow
         // revalidates the session. Do not leave a fallback cursor unlocked.
         if (!ReferenceEquals(current, proxy)) return;
         current = null;
+        NpcArmorIndicator.Clear();
         RestoreEquippedColors();
         if (proxy.Fallback && proxy.OldCursorCaptured)
         { Cursor.lockState = proxy.OldCursorLock; Cursor.visible = proxy.OldCursorVisible; }
@@ -344,6 +364,7 @@ internal static partial class NpcInventoryWindow
         if (!current || !current!.Npc || NativeAccess.Read(gui, "m_currentContainer") as Container != current.Container) return;
         var label = NativeAccess.Read(gui, "m_containerName");
         if (label != null) UiReflection.Write(label, "text", "Инвентарь: " + current.Npc.GetPlayerName());
+        NpcArmorIndicator.Update(gui, current.Npc);
     }
 
     internal static void UpdateEquippedColors(InventoryGrid grid)

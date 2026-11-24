@@ -10,7 +10,7 @@ using UnityEngine.Networking;
 
 namespace ValheimAIHelper;
 
-[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.8.2")]
+[BepInPlugin("dev.valheim.aihelper", "Valheim AI Helper", "0.8.3")]
 [DefaultExecutionOrder(-100)]
 public sealed partial class Plugin : BaseUnityPlugin
 {
@@ -94,6 +94,14 @@ public sealed partial class Plugin : BaseUnityPlugin
     private void FixedUpdate()
     {
         if (!active || actor == null || !actor) return;
+        if (NpcInventoryWindow.IsOpenFor(actor))
+        {
+            // A temporary inventory gate must retain the lease and receipt;
+            // Stop would forget an already committed transfer's acknowledgement.
+            executor.Pause();
+            actor.GetComponent<CompanionNpc>().Stop();
+            return;
+        }
         if (!CompanionNpc.Is(actor) || actor == Player.m_localPlayer || !actor.IsOwner())
         { DisableControl("Сетевая принадлежность персонажа изменилась. AI отключён."); return; }
         try
@@ -221,7 +229,7 @@ public sealed partial class Plugin : BaseUnityPlugin
                 observation.Data.task_pool_supported = true;
                 observation.Data.reflex_active = executor.ReflexActive;
                 observation.Data.world_id = ZNet.instance.GetWorldUID().ToString(System.Globalization.CultureInfo.InvariantCulture);
-                observation.Data.simulation_paused = Time.timeScale < .01f;
+                observation.Data.simulation_paused = Time.timeScale < .01f || NpcInventoryWindow.IsOpenFor(actor);
                 observation.Data.listen_chat = allowChat.Value;
                 observation.Data.plan_id = executor.PlanId;
                 observation.Data.action_status = executor.ActionStatus;

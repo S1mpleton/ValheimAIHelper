@@ -105,7 +105,8 @@ internal static partial class NpcInventoryWindow
 
     private static void DrawFallbackBag(NpcInventoryProxy proxy, Inventory bag, Player owner, string title, float x, float width, float cell)
     {
-        GUI.Label(new Rect(x, 0, width, 28), title);
+        string armor = NpcArmorIndicator.Value(owner);
+        GUI.Label(new Rect(x, 0, width, 28), title + " · Броня: " + armor);
         for (int row = 0; row < bag.GetHeight(); row++)
             for (int col = 0; col < bag.GetWidth(); col++)
             {

@@ -146,9 +146,8 @@ public sealed partial class Plugin
         // Upstream diagnostics stay in the local journal; chat acknowledgements are bounded.
         if (reply.Length > 220) reply = reply.Substring(0, 220);
         var npc = actor ? actor : CurrentNpc;
-        var talker = npc ? npc!.GetComponent<Talker>() : null;
-        if (talker) talker!.Say(Talker.Type.Normal, "[AI] " + reply);
-        else if (Chat.instance) Chat.instance.AddString("[AI: " + npcName.Value + "] " + reply);
+        if (!npc || !NpcChat.Send(npc!, "[AI] " + reply, message => AddLog("npc-chat", message)))
+            NpcChat.Local(npc ? npc!.GetPlayerName() : npcName.Value, "[AI] " + reply);
     }
     private void SelectNextLeader()
     {

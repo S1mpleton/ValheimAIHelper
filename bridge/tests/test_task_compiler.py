@@ -569,9 +569,9 @@ async def test_whole_bag_scope_is_independently_confirmed_for_every_provider(sna
             with pytest.raises(ProviderInvalidAction, match="исходное поручение"):
                 await compile_tasks(state, objective, world(snapshot))
         assert [task.id for task in state.task_pool.tasks] == before
-        assert [phase for phase, _ in calls] == (["plan", "scope", "transfer"] if confirmed else ["plan", "scope"])
+        assert [phase for phase, _ in calls] == ["plan", "transfer", "scope"]
         traces = list(state.dialogue.records.values())
-        assert [record.purpose for record in traces] == (["tasks", "task-scope", "task-transfer"] if confirmed else ["tasks", "task-scope"])
+        assert [record.purpose for record in traces] == ["tasks", "task-transfer", "task-scope"]
         assert traces[0].status == ("ok" if confirmed else "error")
         assert traces[1].status == "ok"
 
@@ -603,6 +603,8 @@ async def test_truthy_string_is_not_a_whole_inventory_confirmation(snapshot):
         body = json.loads(request.content)
         schema = body["response_format"]["json_schema"]["schema"]
         if "confirmed" in schema.get("properties", {}): value = {"confirmed": "true"}
+        elif "transfers" in schema.get("properties", {}):
+            value = {"transfers": [{"kind": "drop", "item_prefabs": [], "amount": 1, "selection": "all_inventory"}]}
         else:
             value = model_batch(schema)
             value["tasks"][1] = model_task(schema, "drop", index=1, selection="all_inventory")
@@ -655,11 +657,12 @@ async def test_each_typed_transfer_is_reviewed_against_original_request_before_p
             batch = await compile_tasks(state, objective, world(snapshot))
             assert batch.tasks[0].amount == amount and batch.tasks[0].selection == selection
         else:
-            with pytest.raises(ProviderInvalidAction, match="исходного поручения"):
+            with pytest.raises(ProviderInvalidAction, match="исходн"):
                 await compile_tasks(state, objective, world(snapshot))
         assert [task.id for task in state.task_pool.tasks] == before
-        assert calls == [False, True]
-        assert [record.purpose for record in state.dialogue.records.values()] == ["tasks", "task-transfer"]
+        assert calls == ([False, True] if confirmed else [False, True, False, True])
+        assert [record.purpose for record in state.dialogue.records.values()] == (["tasks", "task-transfer"] if confirmed
+            else ["tasks", "task-transfer", "tasks-repair", "task-transfer"])
 
 
 async def test_transfer_review_rejects_yes_instead_of_independent_extraction(snapshot):
@@ -671,7 +674,7 @@ async def test_transfer_review_rejects_yes_instead_of_independent_extraction(sna
             value = {"tasks": [model_task(schema, "give", item_prefabs=["Stone"], amount=5)]}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(value)}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ProviderInvalidAction, match="Не удалось независимо определить предметы"):
+        with pytest.raises(ProviderInvalidAction, match="независимый разбор"):
             await compile_tasks(state_for(client, "openai"), "Дай пять камней", world(snapshot))
 
 

@@ -8,6 +8,7 @@ variants encode those constraints without choosing goals or priorities.
 from copy import deepcopy
 
 from .task_pool import TaskBatch
+from .task_action_schema import task_action_schema
 
 
 def _strict_objects(node):
@@ -34,12 +35,9 @@ def task_batch_schema(snapshot, candidates, new_task_ids, existing_task_ids, pro
     """
     schema = TaskBatch.model_json_schema()
     definitions = schema["$defs"]
-    supported = {"wait", *snapshot.supported_actions} - {"follow", "pickup", "give", "drop"}
-    definitions["Action"]["enum"] = [value for value in definitions["Action"]["enum"] if value in supported]
-    # Ollama's grammar does not enforce numeric minimum/maximum. Use finite
-    # legal choices for short action leases so an otherwise correct equip
-    # cannot repeatedly fail with duration=10. These remain model choices.
-    definitions["Decision"]["properties"]["duration"]["enum"] = [.25, .5, .75, 1, 1.5, 2, 2.5, 3]
+    atomic = task_action_schema(snapshot)
+    definitions.update(atomic.pop("$defs", {}))
+    definitions["Decision"] = atomic
     base = deepcopy(definitions["TaskSpec"]["properties"])
     base["id"] = {"type": "string", "enum": list(new_task_ids)}
     base["priority"].pop("default", None)
@@ -96,5 +94,9 @@ def task_batch_schema(snapshot, candidates, new_task_ids, existing_task_ids, pro
     definitions["TaskEdit"] = {"anyOf": edit_variants}
     if not existing_task_ids: schema["properties"]["edits"]["maxItems"] = 0
     schema["properties"]["catalog_queries"] = {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 120}, "maxItems": 3}
+    # Edits are a first-class planner output, not an append-only afterthought.
+    # A local decoder can emit them before filling a list of new tasks.
+    properties = schema["properties"]
+    schema["properties"] = {name: properties[name] for name in ("edits", "tasks", "mode", "combat_policy", "catalog_queries")}
     if provider != "ollama": _strict_objects(schema)
     return schema
