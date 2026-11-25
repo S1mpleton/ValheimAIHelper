@@ -174,16 +174,18 @@ class ModelSession:
         async with self.lock:
             await self._select(client, base, model)
 
-    async def generate(self, client, base, model, messages, schema, statistics, trace=None, num_predict=2048):
+    async def generate(self, client, base, model, messages, schema, statistics, trace=None, num_predict=2048, num_ctx=16384):
         async with self.lock:
             await self._select(client, base, model)
-            return await generate(client, base, model, messages, schema, statistics=statistics, trace=trace, num_predict=num_predict)
+            return await generate(client, base, model, messages, schema, statistics=statistics, trace=trace, num_predict=num_predict, num_ctx=num_ctx)
 
 
-async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict, *, statistics=None, trace=None, num_predict=2048) -> str:
+async def generate(client: httpx.AsyncClient, base: str, model: str, messages: list, schema: dict | None, *, statistics=None, trace=None, num_predict=2048, num_ctx=16384) -> str:
     info = await model_info(client, base, model)
-    payload = {"model": model, "messages": messages, "format": schema, "stream": False,
-               "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 16384, "num_predict": num_predict}}
+    payload = {"model": model, "messages": messages, "stream": False,
+               "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": num_ctx, "num_predict": num_predict}}
+    if schema is not None:
+        payload["format"] = schema
     payload["think"] = thinking_option(info)
     if trace is not None: trace.set("request", payload)
     data = await request(client, base, "POST", "/api/chat", payload=payload, timeout=OLLAMA_DECISION_TIMEOUT - 15)
@@ -191,7 +193,11 @@ async def generate(client: httpx.AsyncClient, base: str, model: str, messages: l
     message = data.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if trace is not None and isinstance(content, str): trace.set("response", content)
-    if not isinstance(content, str) or not content.strip() or data.get("done_reason") == "length":
+    if not isinstance(content, str) or not content.strip():
+        if schema is None:
+            raise ProviderError("Ollama не вернула текстовый ответ. Проверьте выбранную модель и настройки сервера.")
+        raise ProviderError("Ollama не завершила JSON с действием. Выберите instruct/chat-модель; reasoning-модель могла потратить лимит на размышления.")
+    if schema is not None and data.get("done_reason") == "length":
         raise ProviderError("Ollama не завершила JSON с действием. Выберите instruct/chat-модель; reasoning-модель могла потратить лимит на размышления.")
     # Reasoning is a separate field; it is never executed, displayed or parsed.
     return content

@@ -161,13 +161,19 @@ public sealed partial class Plugin
         uiMessage = provider == "ollama" ? "Запустите Ollama и получите список установленных моделей. API-ключ не нужен." : "Выберите модель и сохраните подключение.";
     }
 
-    private bool ValidateAi(out int seconds)
+    private bool ValidateConnection()
     {
-        seconds = 20;
         if (string.IsNullOrWhiteSpace(uiModel)) { uiSettings = true; uiError = "Выберите модель в разделе «Подключение»."; return false; }
         if (AiProviders.RequiresKey(uiProvider) && string.IsNullOrWhiteSpace(uiKey) && !HasKey(uiProvider)) { uiSettings = true; uiError = "Введите API-ключ в разделе «Подключение»."; return false; }
         if (uiProvider == "ollama" && !BridgeAddress.IsValid(uiOllamaUrl.Trim()))
         { uiSettings = true; uiError = "Ollama: укажите локальный HTTP-адрес, например http://127.0.0.1:11434."; return false; }
+        return true;
+    }
+
+    private bool ValidateAi(out int seconds)
+    {
+        seconds = 20;
+        if (!ValidateConnection()) return false;
         if (!int.TryParse(uiInterval, out seconds) || seconds < 4 || seconds > 300)
         { uiSettings = true; uiError = "Пауза между решениями должна быть от 4 до 300 секунд."; return false; }
         return true;
@@ -322,14 +328,14 @@ public sealed partial class Plugin
     private IEnumerator CheckModel()
     {
         int operation = ++uiOperation;
-        uiBusy = true; uiError = ""; uiMessage = uiProvider == "ollama" ? "Проверяю Ollama… Первая загрузка модели может занять до 5 минут. F9 — отмена." : "Проверяю модель…";
+        uiBusy = true; uiError = ""; uiMessage = uiProvider == "ollama" ? "Проверяю подключение к Ollama и ответ модели… Первая загрузка может занять до 5 минут. F9 — отмена." : "Проверяю подключение и ответ модели…";
         try
         {
-            if (uiClient == null || !ValidateAi(out _)) yield break;
+            if (uiClient == null || !ValidateConnection()) yield break;
             journal.RegisterSecret(uiKey.Trim());
             yield return uiClient.Request<ModelCheckReply>("/api/check/" + uiProvider, new ModelCheckRequest { model = uiModel.Trim(), api_key = AiProviders.RequiresKey(uiProvider) ? uiKey.Trim() : "", ollama_url = uiOllamaUrl.Trim() }, value =>
             {
-                if (operation == uiOperation) uiMessage = "Модель отвечает. " + string.Join("; ", value.checks ?? Array.Empty<string>()) + ". Сохраните подключение и включите AI.";
+                if (operation == uiOperation) uiMessage = "Подключение проверено. " + string.Join("; ", value.checks ?? Array.Empty<string>()) + ". Сохраните подключение и включите AI.";
             }, error => { if (operation == uiOperation) uiError = error; }, AiProviders.UiTimeout(uiProvider));
         }
         finally { if (operation == uiOperation) uiBusy = false; }
@@ -448,7 +454,7 @@ public sealed partial class Plugin
         uiInterval = GUILayout.TextField(uiInterval, 3, GUILayout.Height(29));
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Сохранить", panelButtonStyle)) StartCoroutine(ApplySettings());
-        if (GUILayout.Button("Проверить модель", panelButtonStyle)) StartCoroutine(CheckModel());
+        if (GUILayout.Button("Проверить подключение", panelButtonStyle)) StartCoroutine(CheckModel());
         GUILayout.EndHorizontal();
         GUILayout.Label(uiProvider == "ollama" ? "Нужна установленная текстовая модель Ollama. Первая загрузка может занять несколько минут; F9 отменяет ожидание."
             : "Ключ хранится только до выключения службы AI. Проверка модели и AI расходуют квоту API.", hintStyle);

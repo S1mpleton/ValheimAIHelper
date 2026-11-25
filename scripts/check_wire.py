@@ -32,8 +32,10 @@ async def main():
     def provider(request):
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "gpt-6-luna"}]})
-        if b"api-check" in request.content:
-            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"mode":"append", "combat_policy":"defend", "tasks":[{"kind":"follow", "priority":31}, {"kind":"collect", "priority":72, "item_prefabs":["Stone"], "continuous":True, "near_leader":True}], "edits":[]})}}]})
+        body=json.loads(request.content)
+        if "response_format" not in body:
+            assert body["max_completion_tokens"]==16 and len(body["messages"])==1
+            return httpx.Response(200,json={"choices":[{"message":{"content":"OK"}}]})
         if b"wire-extended" in request.content:
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"steps": [{
                 "action":"drop", "target_id":"inventory:stones", "amount":5, "duration":1, "say":"Выбрасываю пять камней"
@@ -55,6 +57,10 @@ async def main():
         if request.url.path=="/api/show": return httpx.Response(200,json={"capabilities":["completion"],"thinking":{"values":[False]}})
         body=json.loads(request.content)
         assert body["think"] is False and body["stream"] is False
+        if "format" not in body:
+            assert body["options"]["num_predict"]==16 and body["options"]["num_ctx"]==1024
+            assert len(body["messages"])==1
+            return httpx.Response(200,json={"message":{"content":"OK"},"done":True})
         if "tasks" in body["format"]["properties"]:
             return httpx.Response(200,json={"message":{"content":json.dumps({"mode":"append", "combat_policy":"defend", "tasks":[{"kind":"follow", "priority":31}, {"kind":"collect", "priority":72, "item_prefabs":["Stone"], "continuous":True, "near_leader":True}], "edits":[]})},"done":True})
         probe=body["format"]["$defs"]["Action"]["enum"]==["wait"]
@@ -228,7 +234,7 @@ async def main():
     print("PASS: in-game panel DTOs -> provider settings/models/check/stop -> Python API -> C# UI decoders")
     print("PASS: background plan -> destination/run/plan ID -> C# policy")
     print("PASS: all action names match; actual C# extended snapshot -> quantity drop decision -> C# policy; ordinary chat DTO")
-    print("PASS: native Ollama settings/status DTOs -> local model list/check/JSON plan -> C# quantity policy; thinking disabled")
+    print("PASS: native Ollama settings/status DTOs -> local model list/plain connection check/JSON game plan -> C# quantity policy; thinking disabled")
     print("PASS: C# loaded ground stack (45m/count=7) -> local pickup plan; give exactly 5 from observed inventory to player -> C# validation")
     print("PASS: actual C# NPC snapshot/quest/item keys -> Ollama bulk give / exact 7 across 5+3 stacks -> C# policy")
     print("PASS: actual model request/raw reply/validation dialogue -> paged Python endpoints -> C# index/page/export DTOs")

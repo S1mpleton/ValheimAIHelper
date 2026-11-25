@@ -17,8 +17,8 @@ public sealed partial class Plugin
     private float nextDialoguePoll;
     private DialogueEntry? CurrentDialogue => dialogueEntries.FirstOrDefault(e => e.id == dialogueId);
     private string DialogueTitle => CurrentDialogue is DialogueEntry e ? "#" + e.id + " · " + e.time + " · " + e.provider + "/" + e.model +
-        "\n" + (e.purpose == "check" ? "Проверка модели · " : e.purpose == "chat" ? "Разбор чата · " : "Игровой план · ") +
-        (e.status == "running" ? "Ожидание " : e.status == "ok" ? "План проверен · " : e.status == "cancelled" ? "Отменён · " : "Ошибка · ") +
+        "\n" + (e.purpose == "check" ? "Проверка подключения · " : e.purpose == "chat" ? "Разбор чата · " : "Игровой план · ") +
+        (e.status == "running" ? "Ожидание " : e.status == "ok" ? (e.purpose == "check" ? "Связь проверена · " : "План проверен · ") : e.status == "cancelled" ? "Отменён · " : "Ошибка · ") +
         e.seconds.ToString("0.0") + " с" + (e.truncated ? " · текст сокращён" : "") : "Последние 8 запросов. Хранятся в памяти до закрытия службы.";
 
     private void UpdateDialogue()

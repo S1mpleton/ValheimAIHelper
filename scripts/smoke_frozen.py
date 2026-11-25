@@ -42,7 +42,7 @@ def main():
                     except OSError:
                         if time.monotonic() > deadline: raise
                         time.sleep(.2)
-                assert health["version"] == "0.8.3", health
+                assert health["version"] == "0.8.4", health
                 req = urllib.request.Request(base + "/api/status", headers={"Authorization": "Bearer " + token})
                 with opener.open(req) as r: status = json.load(r)
                 assert status["mode"] == "stop" and not status["keys_present"]["openai"]
@@ -71,8 +71,9 @@ def main():
                         if self.path=="/api/show": self.respond({"capabilities":["completion"],"thinking":{"values":[False]}})
                         else:
                             assert self.path=="/api/chat" and body["think"] is False and body["stream"] is False
-                            assert "tasks" in body["format"]["properties"] and "steps" not in body["format"]["properties"]
-                            self.respond({"done":True,"message":{"content":json.dumps({"mode":"append", "combat_policy":"defend", "tasks":[{"kind":"follow", "priority":31}, {"kind":"collect", "priority":72, "item_prefabs":["Stone"], "continuous":True, "near_leader":True}], "edits":[]})}})
+                            assert "format" not in body and body["options"]["num_predict"]==16
+                            assert body["options"]["num_ctx"]==1024 and len(body["messages"])==1
+                            self.respond({"done":True,"message":{"content":"OK"}})
                 def post(path,value):
                     request=urllib.request.Request(base+path,data=json.dumps(value).encode(),headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
                     with opener.open(request,timeout=10) as response: return json.load(response)
@@ -88,7 +89,7 @@ def main():
                             with opener.open(urllib.request.Request(base+path,headers={"Authorization":"Bearer "+token}),timeout=10) as r:return json.load(r)
                         dialogue=get("/api/dialogue");id=dialogue["entries"][0]["id"]
                         assert get(f"/api/dialogue/{id}?part=request")["part"]=="request"
-                        assert '"tasks"' in get(f"/api/dialogue/{id}?part=response")["text"]
+                        assert get(f"/api/dialogue/{id}?part=response")["text"]=="OK"
                         assert "Valheim AI Helper" in get(f"/api/dialogue/{id}/export")["text"]
                         assert post("/api/dialogue/clear",{})["ok"] and not get("/api/dialogue")["entries"]
                         # Exercise the bundled task modules and native task path
@@ -123,7 +124,7 @@ def main():
                     finally:
                         server.shutdown();worker.join(timeout=3)
                 print("PASS: frozen runtime starts without Python/source in cwd; HTTP/auth/static/status/ordinary-chat")
-                print("PASS: bundled Ollama adapter -> local HTTP models/show/chat -> validated follow/collect task pool, no key, think=false")
+                print("PASS: bundled Ollama adapter -> local HTTP models/show/chat -> plain connection check, no key, think=false")
                 print("PASS: bundled task scheduler -> context/follow/pause/preserve/resume/stop/persistence, zero extra model calls")
             finally:
                 if child.poll() is None: child.terminate()

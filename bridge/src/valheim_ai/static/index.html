@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.8.3</p><h1>Рядом в другом мире.</h1><p>Пульт NPC-напарника Valheim в вашем мире. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
+  <header><span class="rune" aria-hidden="true">ᛉ</span><div><p class="eyebrow">VALHEIM AI HELPER · ПРОТОТИП 0.8.4</p><h1>Рядом в другом мире.</h1><p>Пульт NPC-напарника Valheim в вашем мире. Игра управляет правилами, ассистент выбирает действия.</p></div><span id="connection" class="badge">Не подключён</span></header>
   <div id="notice" role="status" aria-live="polite">Один клиент + NPC. В игре: Esc → Управление персонажем → Создать / найти NPC.</div>
   <section id="pairing">
     <h2>01 · Подключение к мосту</h2>
@@ -30,8 +30,8 @@
             <label id="models-label" for="gemini-model-choice">Модели провайдера</label>
             <select id="gemini-model-choice" disabled><option value="">Сначала получите список моделей</option></select>
             <p id="models-hint" class="hint">После выбора модели нажмите «Применить настройки».</p>
-            <button id="check-model" type="button" class="secondary">Проверить выбранную модель</button>
-            <p id="check-hint" class="hint">Проверка плана следования и сбора на вымышленном мире. Данные игры не отправляются.</p>
+            <button id="check-model" type="button" class="secondary">Проверить подключение</button>
+            <p id="check-hint" class="hint">Проверяет связь и короткий ответ выбранной модели. Данные игры не отправляются.</p>
           </div>
           <div id="cloud-key-fields"><label for="api-key">API-ключ <span id="key-status"></span></label><input id="api-key" type="password" autocomplete="off" placeholder="Хранится только в памяти сервиса"></div>
           <label for="api-interval">Интервал решений AI, секунды</label><input id="api-interval" type="number" value="20" min="4" max="300" step="1" required>

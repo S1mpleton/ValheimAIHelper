@@ -17,7 +17,7 @@ import httpx
 
 from .protocol import Action, DecisionReply, Snapshot, StrictModel, validate_decision, wait, Decision, Plan
 from .providers import (ProviderError, ProviderUnavailable, ProviderModelNotFound, ProviderRateLimited, ProviderLocalConfigurationError,
-                        decide, list_gemini_models, list_openai_models, diagnose_gemini,
+                        decide, list_gemini_models, list_openai_models,
                         API_TIMEOUT, DECISION_TIMEOUT, OLLAMA_DECISION_TIMEOUT, CONNECTED_TIMEOUT)
 from .ollama import DEFAULT_URL, ModelSession, local_url, valid_model, list_models as list_ollama_models
 from .performance import Performance
@@ -27,7 +27,7 @@ from . import __version__
 from .planning import Planner
 from .task_runtime import TaskRuntime
 from .task_storage import migrate_legacy_task_pools
-from .model_check import check_snapshot, check_task_planner
+from .model_check import check_connection
 from .chat_intent import classify_chat
 from .task_policy import companion_duty
 
@@ -578,9 +578,8 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
         key = settings.api_key.get_secret_value() or state.keys.get(provider, "")
         if provider != "ollama" and not key:
             raise HTTPException(409, "Введите API-ключ или примените его в настройках")
-        # Explicit operator-triggered check uses the exact production adapter and schema,
-        # but no game observations or control state. The result is never sent to the mod.
-        probe = check_snapshot().model_copy(update={"supported_actions": ["wait"]})
+        # Availability only: no observations, task plans or action schema enter
+        # this request. The result is never used to control the NPC.
         if state.check_task is not None or state.switch_task is not None: raise HTTPException(409, "Предыдущая проверка/смена модели ещё выполняется. Стоп/F9 отменяет её.")
         if provider == "ollama" and state.command.mode == "ai" and (state.provider, state.model, state.ollama_url) != (provider, settings.model, base):
             state.command = state.command.model_copy(update={"mode": "stop"})
@@ -590,11 +589,7 @@ def create_app(token: str | None = None, client: httpx.AsyncClient | None = None
             state.event("bridge", "Проверка другой модели Ollama: AI остановлен, чтобы прежняя модель не загрузилась снова. После проверки сохраните подключение и включите AI.")
         revision = state.revision
         async def perform_check():
-            checks = []
-            if provider == "gemini":
-                checks = await diagnose_gemini(state.client, settings.model, key, probe)
-            checks.extend(await check_task_planner(state, provider, settings.model, key, base))
-            return checks
+            return await check_connection(state, provider, settings.model, key, base)
         state.planner.interrupt_planning()
         state.cancel_chat()
         task = asyncio.create_task(perform_check())

@@ -45,7 +45,7 @@ function providerFields() {
   $("ollama-fields").hidden = p !== "ollama";
   $("cloud-key-fields").hidden = p === "ollama" || p === "offline";
   $("models-label").textContent = p === "ollama" ? "Установленные локальные модели" : "Модели провайдера";
-  $("check-hint").textContent = p === "ollama" ? "Проверка плана следования и сбора; первая загрузка может занять до 5 минут. Стоп/F9 отменяет ожидание. Данные игры не отправляются." : "Проверка подключения и плана следования со сбором может расходовать квоту API. Данные игры не отправляются.";
+  $("check-hint").textContent = p === "ollama" ? "Проверка подключения и короткого ответа; первая загрузка может занять до 5 минут. Стоп/F9 отменяет ожидание. Данные игры не отправляются." : "Проверка подключения и короткого ответа может расходовать квоту API. Данные игры не отправляются.";
   $("provider-hint").textContent = p === "ollama" ? "AI выполняется локально без облачных токенов. Скорость зависит от модели и ресурсов ПК." : "Ключ оплачивается по тарифам API. Подписка ChatGPT или Gemini не заменяет API-ключ.";
   $("interval-hint").textContent = p === "ollama" ? "Интервал ограничивает нагрузку на ПК. Движение персонажа продолжается между решениями модели." : "20 секунд — около 3 решений в минуту. Повторы и ручные проверки тоже расходуют квоту.";
   $("model").required = p !== "offline";
@@ -129,7 +129,7 @@ async function refreshDialogue() {
     $("dialogue-choice").value = String(dialogueId);
     const record = dialogueRecords.find(r => r.id === dialogueId);
     $("dialogue-copy").disabled = $("dialogue-save").disabled = !record || record.status === "running";
-    $("dialogue-info").textContent = record ? `${{check:"Проверка модели",chat:"Разбор чата",plan:"Игровой план"}[record.purpose] || "Запрос"} · ${record.status === "running" ? "Ожидание" : record.status === "ok" ? "План проверен" : record.status === "cancelled" ? "Отменён" : "Ошибка"} · ${record.seconds.toFixed(1)} с${record.truncated ? " · текст сокращён" : ""}` : "Диалогов пока нет. Включите AI или проверьте модель.";
+    $("dialogue-info").textContent = record ? `${{check:"Проверка подключения",chat:"Разбор чата",plan:"Игровой план"}[record.purpose] || "Запрос"} · ${record.status === "running" ? "Ожидание" : record.status === "ok" ? (record.purpose === "check" ? "Связь проверена" : "План проверен") : record.status === "cancelled" ? "Отменён" : "Ошибка"} · ${record.seconds.toFixed(1)} с${record.truncated ? " · текст сокращён" : ""}` : "Диалогов пока нет. Включите AI или проверьте модель.";
     if (!record) { $("dialogue-text").textContent = ""; return; }
     const detail = await api(`/api/dialogue/${dialogueId}?part=${dialoguePart}&page=${dialoguePage}`);
     if (epoch !== dialogueEpoch) return;

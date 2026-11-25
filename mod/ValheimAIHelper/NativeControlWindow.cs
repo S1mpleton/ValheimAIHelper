@@ -267,7 +267,7 @@ public sealed partial class Plugin
             Label(tab, "Пауза между планами AI, сек.", 0, 299, 416, 24, 15);
             intervalInput = InputField(tab, p.uiInterval, 422, 291, 74, 36, 3, s => p.uiInterval = s);
             Button(tab, "Сохранить", 528, 291, 284, () => p.StartCoroutine(p.ApplySettings()), true);
-            Button(tab, "Проверить модель", 528, 336, 284, () => p.StartCoroutine(p.CheckModel()), true);
+            Button(tab, "Проверить подключение", 528, 336, 284, () => p.StartCoroutine(p.CheckModel()), true);
             keyStatusLabel = Label(tab, "", 0, 348, 510, 25, 15);
         }
         private void BuildJournal(Transform tab)
